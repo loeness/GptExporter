@@ -1,0 +1,9 @@
+node_modules/
+work/
+test-results/
+*.zip
+*.crx
+*.pem
+AGENTS.md
+Agent.md
+.DS_Store

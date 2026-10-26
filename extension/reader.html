@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>对话导出器 · 阅读器</title>
+  <link rel="stylesheet" href="styles/reader.css">
+  <script src="src/exporters.js" defer></script>
+  <script src="src/reader.js" defer></script>
+</head>
+<body>
+  <div class="app-shell" id="app-shell">
+    <header class="topbar">
+      <a class="brand" href="#main" aria-label="对话导出器">
+        <span class="brand-mark" aria-hidden="true">g</span>
+        <span><strong>对话导出器</strong><small>GPT EXPORTER · READER</small></span>
+      </a>
+      <div class="topbar-actions">
+        <span class="privacy-note"><span class="privacy-dot" aria-hidden="true"></span>本地处理 · 只读已加载内容</span>
+        <button class="icon-button" id="theme-toggle" type="button" aria-label="切换明暗主题" title="切换主题">
+          <span aria-hidden="true">◐</span>
+        </button>
+        <button class="icon-button danger-quiet" id="clear-data" type="button" aria-label="清除本次导出数据" title="清除本次导出数据">
+          <span aria-hidden="true">⌫</span>
+        </button>
+      </div>
+    </header>
+
+    <main id="main" class="workspace">
+      <aside class="sidebar" aria-label="消息选择">
+        <div class="sidebar-heading">
+          <div>
+            <p class="eyebrow">CONVERSATION</p>
+            <h1>整理消息</h1>
+          </div>
+          <span class="message-total" id="message-total">0 条</span>
+        </div>
+
+        <label class="search-box" for="message-search">
+          <span aria-hidden="true">⌕</span>
+          <input id="message-search" type="search" placeholder="搜索消息内容" autocomplete="off">
+          <kbd>/</kbd>
+        </label>
+
+        <div class="selection-actions" aria-label="快速选择">
+          <button type="button" data-select="all">全选</button>
+          <button type="button" data-select="none">清空</button>
+          <button type="button" data-select="user">仅 User</button>
+          <button type="button" data-select="assistant">仅 Assistant</button>
+        </div>
+        <p class="search-hint">搜索仅筛选列表，不会改变导出勾选。</p>
+        <ol class="message-list" id="message-list" aria-label="对话消息"></ol>
+        <div class="list-empty" id="list-empty" hidden>没有匹配的消息</div>
+
+        <div class="sidebar-footer">
+          <span class="selection-count" id="selection-count" aria-live="polite">已选择 0 条</span>
+          <span class="selection-note">仅导出已勾选消息</span>
+        </div>
+      </aside>
+
+      <section class="reader-panel" aria-label="导出预览与操作">
+        <div class="toolbar">
+          <div class="title-editor">
+            <label for="conversation-title">文档标题</label>
+            <input id="conversation-title" type="text" maxlength="180" placeholder="为这份导出命名">
+          </div>
+          <label class="metadata-toggle">
+            <input id="include-metadata" type="checkbox">
+            <span class="toggle-track" aria-hidden="true"></span>
+            <span>包含来源信息</span>
+          </label>
+          <div class="toolbar-divider" aria-hidden="true"></div>
+          <button class="button button-subtle" id="copy-markdown" type="button">
+            <span aria-hidden="true">▣</span> 复制 Markdown
+          </button>
+          <button class="button button-subtle" id="print-document" type="button">
+            <span aria-hidden="true">▤</span> 打印 / 保存 PDF
+          </button>
+        </div>
+
+        <div class="format-bar" aria-label="导出格式">
+          <span class="format-label">导出为</span>
+          <div class="format-actions">
+            <button class="format-button" type="button" data-format="markdown"><span>.md</span> Markdown</button>
+            <button class="format-button" type="button" data-format="text"><span>.txt</span> 纯文本</button>
+            <button class="format-button" type="button" data-format="html"><span>.html</span> 网页</button>
+            <button class="format-button" type="button" data-format="json"><span>.json</span> JSON</button>
+            <button class="format-button" type="button" data-format="csv" title="公式前缀字段会加单引号，降低表格软件执行公式的风险"><span>.csv</span> 表格</button>
+          </div>
+          <span class="format-footnote">下载到本地设备</span>
+        </div>
+
+        <div class="status-line" id="status-line" role="status" aria-live="polite" hidden></div>
+
+        <div class="paper-stage" id="paper-stage">
+          <article class="paper" id="preview-paper" aria-label="所选消息预览">
+            <div class="paper-content" id="preview-content"></div>
+          </article>
+          <div class="paper-empty" id="preview-empty" hidden>
+            <span class="empty-glyph" aria-hidden="true">✳</span>
+            <strong>还没有选择消息</strong>
+            <p>从左侧勾选要预览和导出的内容。</p>
+          </div>
+          <div class="paper-error" id="load-error" hidden>
+            <span class="error-glyph" aria-hidden="true">!</span>
+            <strong id="error-title">无法打开这份导出</strong>
+            <p id="error-detail">导出记录可能已过期，或数据格式不完整。</p>
+            <button class="button button-subtle" id="reload-demo" type="button" hidden>打开示例</button>
+          </div>
+        </div>
+
+        <footer class="reader-footer">
+          <span id="source-caption">只读取浏览器中已加载的对话 DOM</span>
+          <span>未加载或未挂载的历史消息不会包含在导出中</span>
+        </footer>
+      </section>
+    </main>
+  </div>
+</body>
+</html>
