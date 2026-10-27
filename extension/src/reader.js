@@ -12,7 +12,13 @@
     query: '',
     preferences: { includeMetadata: true, theme: 'light' },
     hasError: false,
-    statusTimer: 0
+    statusTimer: 0,
+    branchId: '__all',
+    renderPromise: Promise.resolve(),
+    renderError: null,
+    renderSequence: 0,
+    busy: false,
+    blobUrls: new Set()
   };
 
   function byId(id) { return root.document.getElementById(id); }
@@ -23,7 +29,7 @@
       'conversation-title', 'include-metadata', 'copy-markdown', 'print-document',
       'theme-toggle', 'clear-data', 'preview-paper', 'preview-content', 'preview-empty',
       'load-error', 'error-title', 'error-detail', 'reload-demo', 'status-line',
-      'source-caption'
+      'source-caption', 'branch-select', 'source-quality', 'load-media', 'pdf-page-size', 'pdf-orientation'
     ].forEach((id) => { els[id] = byId(id); });
   }
 
@@ -106,7 +112,7 @@
 
   function validateConversation(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('保存的数据为空或不是有效对象。');
-    if (value.schemaVersion !== 1) throw new TypeError('数据版本不受支持。');
+    if (![1, 2].includes(value.schemaVersion)) throw new TypeError('数据版本不受支持。');
     if (typeof value.title !== 'string' || typeof value.url !== 'string' || typeof value.exportedAt !== 'string') {
       throw new TypeError('对话标题或来源信息不完整。');
     }
@@ -140,6 +146,9 @@
     state.conversation = null;
     state.selected.clear();
     state.hasError = true;
+    if(els['branch-select'])els['branch-select'].disabled=true;
+    if(els['load-media'])els['load-media'].disabled=true;
+    if(els['source-quality'])els['source-quality'].textContent='没有可用的导出记录';
     els['message-total'].textContent = '0 条';
     els['message-list'].replaceChildren();
     els['preview-content'].replaceChildren();
@@ -196,15 +205,41 @@
     }
     if (!stored) throw new Error('这份导出记录已过期或不存在。请返回对话页重新生成。');
     state.conversation = validateConversation(stored);
+    state.conversation.exportId = id;
+  }
+
+  function branchMessages() {
+    if (!state.conversation) return [];
+    const branch = state.conversation.branches?.find(item => item.id === state.branchId);
+    if (!branch) return state.conversation.messages;
+    const byId = new Map(state.conversation.messages.map(message => [message.id,message]));
+    return branch.messageIds.map(id => byId.get(id)).filter(Boolean);
+  }
+
+  function initializeBranches() {
+    const list = els['branch-select']; list.replaceChildren();
+    const branches = state.conversation.branches || [];
+    for (const branch of branches) {
+      const option = root.document.createElement('option'); option.value=branch.id;
+      option.textContent=`${branch.label} (${branch.messageIds.length} 条)`; list.append(option);
+    }
+    const all = root.document.createElement('option'); all.value='__all';all.textContent='全部分支（共同消息仅一次）';list.append(all);
+    state.branchId = branches.some(branch => branch.id === state.conversation.activeBranchId) ? state.conversation.activeBranchId : '__all';
+    list.value=state.branchId;
+    const source=state.conversation.source;
+    const names={api:'完整对话 API',shared:'共享对话',temporary:'临时对话',dom:'页面 DOM'};
+    els['source-quality'].textContent=`${names[source?.kind] || '页面 DOM'} · ${source?.complete ? '已读取返回的完整消息树' : '部分数据，请留意提示'} · ${branches.length || 1} 个分支`;
+    els['load-media'].disabled=!(state.conversation.assets?.length);
+    els['source-caption'].textContent=source?.complete ? '消息树在本地解析，数据不经过自建服务器' : '未确认完整历史；仅导出本次实际取得的内容';
   }
 
   function selectedMessages() {
     if (!state.conversation) return [];
-    return state.conversation.messages.filter((message) => state.selected.has(message.id));
+    return branchMessages().filter((message) => state.selected.has(message.id));
   }
 
   function currentConversation() {
-    return Object.assign({}, state.conversation, { title: els['conversation-title'].value });
+    return Object.assign({}, state.conversation, { title: els['conversation-title'].value, selection:{branchId:state.branchId} });
   }
 
   function shortText(message) {
@@ -217,7 +252,7 @@
     list.replaceChildren();
     const query = state.query.trim().toLocaleLowerCase();
     let visibleCount = 0;
-    state.conversation.messages.forEach((message, index) => {
+    branchMessages().forEach((message, index) => {
       const searchable = `${ROLE_LABELS[message.role]} ${message.text} ${message.markdown}`.toLocaleLowerCase();
       if (query && !searchable.includes(query)) return;
       visibleCount += 1;
@@ -257,16 +292,19 @@
     });
     els['list-empty'].hidden = visibleCount > 0;
     els['list-empty'].textContent = '没有匹配的消息';
-    els['message-total'].textContent = `${state.conversation.messages.length} 条`;
+    els['message-total'].textContent = `${branchMessages().length} 条`;
   }
 
   function renderPreview() {
+    const renderSequence=++state.renderSequence;
+    state.renderError=null;
     const selected = selectedMessages();
     const empty = selected.length === 0;
     els['preview-empty'].hidden = !empty;
     els['preview-paper'].hidden = empty;
     if (empty) {
       els['preview-content'].replaceChildren();
+      state.renderPromise=Promise.resolve();
       return;
     }
 
@@ -275,8 +313,13 @@
         includeMetadata: els['include-metadata'].checked,
         messages: selected
       });
-      els['preview-content'].innerHTML = output;
-    } catch (_) {
+      const stage=root.document.createElement('div');stage.innerHTML=output;
+      els['preview-content'].replaceChildren(stage);
+      state.renderPromise = root.GptExporter.enhanceRichContent
+        ? root.GptExporter.enhanceRichContent(stage,state.conversation).catch(error => {if(renderSequence===state.renderSequence){state.renderError=error;showStatus('富内容渲染失败：'+error.message,'error');}})
+        : Promise.resolve();
+    } catch (error) {
+      state.renderError=error;
       els['preview-content'].replaceChildren();
       showStatus('预览生成失败，请重新加载这份对话。', 'error');
     }
@@ -294,30 +337,58 @@
     els['theme-toggle'].setAttribute('aria-label', state.preferences.theme === 'dark' ? '切换到浅色主题' : '切换到深色主题');
   }
 
-  function saveBlob(format) {
-    const messages = selectedMessages();
-    if (!messages.length) throw new Error('请先勾选至少一条消息。');
-    const result = root.GptExporter.serialize(currentConversation(), {
-      format,
-      includeMetadata: els['include-metadata'].checked,
-      messages
-    });
+  function setBusy(value) {
+    state.busy=value;
+    root.document.querySelectorAll('[data-format],[data-select],#message-list input,#copy-markdown,#print-document,#clear-data,#branch-select,#conversation-title,#include-metadata,#message-search,#load-media')
+      .forEach(element => { element.disabled=value || (element.id==='load-media'&&!state.conversation?.assets?.length); });
+  }
+
+  async function hydrateSelectedAssets() {
+    const ids=new Set(selectedMessages().map(message=>message.id));
+    const explicitIds=new Set(selectedMessages().flatMap(message=>message.assetIds||[]));
+    const assets=(state.conversation.assets||[]).filter(asset=>ids.has(asset.messageId)||explicitIds.has(asset.id));
+    if (assets.length && root.GptExporter.loadConversationAssets) {
+      await root.GptExporter.loadConversationAssets({...state.conversation,assets},{onProgress:progress=>showStatus(`正在嵌入媒体 ${progress.completed}/${progress.total}：${progress.name}`,'info')});
+      const failed=assets.filter(asset=>asset.status!=='ready');
+      if (failed.length) showStatus(`${failed.length} 个媒体无法嵌入，文档中会保留缺失提示。`,'error');
+    }
+    renderPreview();await state.renderPromise;
+    if(state.renderError)throw new Error('富内容未能完成渲染，本次导出已停止：'+state.renderError.message);
+  }
+
+  function downloadResult(result) {
     const blob = new Blob([result.content], { type: result.mime });
-    const href = root.URL.createObjectURL(blob);
+    const href = root.URL.createObjectURL(blob);state.blobUrls.add(href);
     const anchor = root.document.createElement('a');
     const baseName = (els['conversation-title'].value || '对话导出')
-      .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '-')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, 100) || '对话导出';
-    anchor.href = href;
-    anchor.download = `${baseName}.${result.extension}`;
-    anchor.hidden = true;
-    root.document.body.append(anchor);
-    anchor.click();
-    anchor.remove();
-    root.setTimeout(() => root.URL.revokeObjectURL(href), 30000);
-    showStatus(`已生成 ${result.extension.toUpperCase()} 文件，仅含所选的 ${messages.length} 条消息。`);
+      .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '-').replace(/\s+/g, ' ').trim().slice(0, 100) || '对话导出';
+    anchor.href = href;anchor.download = `${baseName}.${result.extension}`;anchor.hidden = true;
+    root.document.body.append(anchor);anchor.click();anchor.remove();
+    root.setTimeout(() => {root.URL.revokeObjectURL(href);state.blobUrls.delete(href);},30000);
+  }
+
+  async function saveBlob(format) {
+    if (state.busy) return;
+    const messages = selectedMessages();
+    if (!messages.length) throw new Error('请先勾选至少一条消息。');
+    setBusy(true);
+    try {
+      let renderedHtml, snapshot;
+      if (format==='pdf'||format==='html') {
+        showStatus('正在准备本地文档与媒体…','info');await hydrateSelectedAssets();
+        snapshot=root.GptExporter.snapshotRichContent ? await root.GptExporter.snapshotRichContent(els['preview-content']) : els['preview-content'].cloneNode(true);
+        renderedHtml=snapshot.innerHTML;
+      }
+      const options={format,includeMetadata:els['include-metadata'].checked,messages,renderedHtml};
+      const result = format==='pdf' ? {
+        content:await root.GptExporter.buildPdf({container:snapshot,conversation:currentConversation(),messages,
+          includeMetadata:options.includeMetadata,pageSize:els['pdf-page-size'].value,orientation:els['pdf-orientation'].value}),
+        mime:'application/pdf',extension:'pdf'
+      } : root.GptExporter.serialize(currentConversation(),options);
+      downloadResult(result);
+      const failed=(state.conversation.assets||[]).filter(asset=>asset.status==='unavailable'&&messages.some(message=>message.id===asset.messageId));
+      showStatus(`已生成 ${result.extension.toUpperCase()}，包含所选 ${messages.length} 条消息${failed.length?`；${failed.length} 个媒体缺失，已保留提示`:''}。`,failed.length?'error':'success');
+    } finally {setBusy(false);}
   }
 
   async function copyMarkdown() {
@@ -339,10 +410,10 @@
     }
   }
 
-  function printDocument() {
+  async function printDocument() {
     try {
       if (!selectedMessages().length) throw new Error('请先勾选至少一条消息。');
-      root.print();
+      await state.renderPromise;root.print();
       showStatus('已打开打印对话框，可选择“保存为 PDF”。', 'info');
     } catch (error) {
       showStatus(error && error.message ? error.message : '无法打开打印对话框。', 'error');
@@ -352,6 +423,9 @@
   async function clearCurrentData() {
     const key = state.storageKey;
     state.conversation = null;
+    state.renderSequence++;
+    for (const href of state.blobUrls) root.URL.revokeObjectURL(href);
+    state.blobUrls.clear();
     state.selected.clear();
     state.storageKey = '';
     renderClearedState();
@@ -374,6 +448,15 @@
   }
 
   function bindEvents() {
+    els['branch-select'].addEventListener('change',()=>{
+      state.branchId=els['branch-select'].value;
+      state.selected=new Set(branchMessages().map(message=>message.id));renderList();renderSelection();
+    });
+    els['load-media'].addEventListener('click',async()=>{
+      if(state.busy||!state.conversation)return;setBusy(true);
+      try{await hydrateSelectedAssets();showStatus('媒体读取完成。不可用的文件已在预览中标出。');}
+      catch(error){showStatus(error.message,'error');}finally{setBusy(false);}
+    });
     els['message-search'].addEventListener('input', () => {
       state.query = els['message-search'].value;
       renderList();
@@ -397,19 +480,19 @@
     root.document.querySelectorAll('[data-select]').forEach((button) => {
       button.addEventListener('click', () => {
         const action = button.dataset.select;
-        if (action === 'all') state.conversation.messages.forEach((message) => state.selected.add(message.id));
+        if (action === 'all') branchMessages().forEach((message) => state.selected.add(message.id));
         else if (action === 'none') state.selected.clear();
         else if (action === 'user' || action === 'assistant') {
           state.selected.clear();
-          state.conversation.messages.filter((message) => message.role === action).forEach((message) => state.selected.add(message.id));
+          branchMessages().filter((message) => message.role === action).forEach((message) => state.selected.add(message.id));
         }
         renderList();
         renderSelection();
       });
     });
     root.document.querySelectorAll('[data-format]').forEach((button) => {
-      button.addEventListener('click', () => {
-        try { saveBlob(button.dataset.format); }
+      button.addEventListener('click', async () => {
+        try { await saveBlob(button.dataset.format); }
         catch (error) { showStatus(error && error.message ? error.message : '生成导出文件失败。', 'error'); }
       });
     });
@@ -429,10 +512,10 @@
     els['include-metadata'].checked = state.preferences.includeMetadata;
     try {
       await loadConversation();
-      state.selected = new Set(state.conversation.messages.map((message) => message.id));
       clearLoadError();
+      initializeBranches();
+      state.selected = new Set(branchMessages().map((message) => message.id));
       els['conversation-title'].value = state.conversation.title;
-      els['source-caption'].textContent = '只读取浏览器中已加载的对话 DOM';
       renderList();
       renderSelection();
       if (new URLSearchParams(root.location.search).get('demo') === '1') {

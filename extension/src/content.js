@@ -3,17 +3,22 @@
   if (globalThis.__gptExporterContentLoaded) return;
   globalThis.__gptExporterContentLoaded = true;
 
-  function collect() {
-    const conversation = globalThis.GptExporter.extractConversation(document, location.href);
+  async function collect() {
+    const conversation = await globalThis.GptExporter.collectConversation({document,url:location.href});
     if (!conversation.messages.length) throw new Error('未找到对话，请打开一段 ChatGPT 对话并等待加载。');
     return conversation;
   }
 
   chrome.runtime.onMessage.addListener((message, sender, respond) => {
-    if (sender.id !== chrome.runtime.id || message?.type !== 'GPT_EXPORTER_COLLECT') return false;
-    try { respond({ok: true, conversation: collect()}); }
-    catch (error) { respond({ok: false, error: error.message}); }
-    return false;
+    if (sender.id !== chrome.runtime.id) return false;
+    if (message?.type === 'GPT_EXPORTER_RESOLVE_ASSET') {
+      globalThis.GptExporter.resolveAsset(message.asset,{source:message.source,url:message.url})
+        .then(asset=>respond({ok:true,asset})).catch(error=>respond({ok:false,error:error.message}));
+      return true;
+    }
+    if (message?.type !== 'GPT_EXPORTER_COLLECT') return false;
+    collect().then(conversation=>respond({ok:true,conversation})).catch(error=>respond({ok:false,error:error.message}));
+    return true;
   });
 
   const host = document.createElement('div');
@@ -31,10 +36,11 @@
     button.disabled = true;
     status.textContent = '';
     try {
-      const response = await chrome.runtime.sendMessage({type: 'GPT_EXPORTER_OPEN', conversation: collect()});
+      button.textContent = '正在读取完整对话…';
+      const response = await chrome.runtime.sendMessage({type: 'GPT_EXPORTER_OPEN', conversation: await collect()});
       if (!response?.ok) throw new Error(response?.error || '无法打开预览。');
     } catch (error) { status.textContent = error.message || '扩展已更新，请刷新本页后重试。'; }
-    finally { button.disabled = false; }
+    finally { button.disabled = false; button.textContent = '↗ 导出对话'; }
   });
   shadow.append(style, button, status);
   document.documentElement.append(host);

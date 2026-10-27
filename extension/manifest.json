@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "GptExporter · 对话导出",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "minimum_chrome_version": "114",
-  "description": "在本地预览、选择并导出 ChatGPT 对话为 Markdown、文本、HTML、JSON，或打印为 PDF。",
+  "description": "本地读取 ChatGPT 完整对话和分支，嵌入图片、附件、公式、Mermaid，直接生成 PDF 或导出其他文档格式。",
   "permissions": ["storage", "activeTab", "scripting"],
   "background": { "service_worker": "src/background.js" },
   "action": {
@@ -12,12 +12,18 @@
     "default_icon": {"16":"icons/icon16.png","32":"icons/icon32.png","48":"icons/icon48.png","128":"icons/icon128.png"}
   },
   "icons": {"16":"icons/icon16.png","32":"icons/icon32.png","48":"icons/icon48.png","128":"icons/icon128.png"},
+  "host_permissions": ["https://chatgpt.com/*", "https://chat.openai.com/*", "https://*.oaiusercontent.com/*", "https://*.blob.core.windows.net/*"],
   "content_scripts": [{
     "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
-    "js": ["src/conversation.js", "src/content.js"],
+    "js": ["src/page-bridge.js"],
+    "world": "MAIN",
+    "run_at": "document_start"
+  }, {
+    "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
+    "js": ["src/conversation.js", "src/history.js", "src/content.js"],
     "run_at": "document_idle"
   }],
   "content_security_policy": {
-    "extension_pages": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    "extension_pages": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://chatgpt.com https://chat.openai.com https://*.oaiusercontent.com https://*.blob.core.windows.net; object-src 'none'; base-uri 'none'; form-action 'none'"
   }
 }

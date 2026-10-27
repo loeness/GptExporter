@@ -58,12 +58,13 @@ test('converts text, HTML, and JSON with their declared formats', () => {
   assert.equal(html.mime, 'text/html;charset=utf-8');
   assert.match(html.content, /^<!doctype html>/i);
   assert.match(html.content, /<meta charset="utf-8">/);
-  assert.match(html.content, /default-src 'none'; img-src 'none'/);
+  assert.match(html.content, /default-src 'none'; img-src data:/);
+  assert.match(html.content, /font-src 'none'; connect-src 'none'/);
   assert.match(html.content, /@media print/);
   assert.match(html.content, /<strong>加粗<\/strong>/);
   const fragment = global.GptExporter.renderHtmlFragment(conversation, { includeMetadata: false });
   assert.doesNotMatch(fragment, /<html|<head|<style/i);
-  assert.match(fragment, /<article>/);
+  assert.match(fragment, /<article data-message-id="u1">/);
 
   assert.equal(json.extension, 'json');
   assert.equal(json.mime, 'application/json;charset=utf-8');
@@ -103,6 +104,89 @@ test('sanitizes untrusted HTML and removes remote resources before parsing', () 
   } finally {
     global.DOMParser = originalParser;
   }
+});
+
+test('sanitizes rendered snapshots while preserving selected raster images and safe attachment downloads', () => {
+  const renderedHtml = '<article data-message-id="u1"><h2>User</h2><img src="data:image/png;base64,iVBORw==" alt="plot" width="44" onerror="attack()"></article>' +
+    '<article data-message-id="a1"><h2>Assistant</h2><img src="data:image/png;base64,iVBORw==" alt="snapshot" width="52" height="28"><img src="https://tracker.example/pixel" alt="remote">' +
+    '<a href="data:application/pdf;base64,JVBERi0xLjQK" download="../answer.pdf" onclick="attack()">PDF</a>' +
+    '<a href="data:image/svg+xml;base64,PHN2Zz4=" download="evil.svg">SVG</a></article>' +
+    '<script>attack()</script><img src="data:image/svg+xml;base64,PHN2Zz4=" alt="vector">';
+  const result = global.GptExporter.serialize(conversation, {
+    format: 'html', includeMetadata: false, messages: [conversation.messages[1]], renderedHtml
+  });
+
+  assert.match(result.content, /<article data-message-id="a1">/);
+  assert.match(result.content, /<img src="data:image\/png;base64,iVBORw==" alt="snapshot" width="52" height="28">/);
+  assert.doesNotMatch(result.content, /data-message-id="u1"|tracker\.example|<script|onclick|onerror|evil\.svg|image\/svg\+xml/i);
+  assert.match(result.content, /<a href="data:application\/pdf;base64,JVBERi0xLjQK" download="\.\._answer\.pdf">PDF<\/a>/);
+});
+
+test('exports v2 branch and asset metadata by whitelist without signed URLs or token fields', () => {
+  const v2 = {
+    schemaVersion: 2,
+    title: '多分支对话',
+    url: 'https://chatgpt.com/c/conversation-1?access_token=secret#branch',
+    exportedAt: '2026-10-27T00:00:00.000Z',
+    selection: { branchId: '__all', secret: 'never export' },
+    warnings: ['media token=secret'],
+    activeBranchId: 'branch-a',
+    branches: [{ id: 'branch-a', label: '当前路径', leafId: 'm2', messageIds: ['m1', 'm2'], secret: 'never export' }],
+    source: { kind: 'api', complete: true, conversationId: 'conversation-1', sourceTabId: 7, accessToken: 'never export' },
+    assets: [{ id: 'image-1', messageId: 'm2', kind: 'image', name: 'plot.png', mimeType: 'image/png', size: 10,
+      fileId: 'file-1', url: 'https://files.oaiusercontent.com/file?sig=secret', dataUrl: 'data:image/png;base64,iVBORw==', status: 'ready', error: 'token=secret' }],
+    messages: [{ id: 'm2', role: 'assistant', markdown: 'Formula $x^2$ and Mermaid source.\n\n```mermaid\nflowchart LR\n A-->B\n```',
+      text: 'Formula x squared', html: '<p>Formula</p>', assetIds: ['image-1'], rawToken: 'never export' }]
+  };
+  const parsed = JSON.parse(global.GptExporter.serialize(v2, { format: 'json' }).content);
+
+  assert.equal(parsed.schemaVersion, 2);
+  assert.equal(parsed.url, 'https://chatgpt.com/c/conversation-1');
+  assert.equal(parsed.source.kind, 'api');
+  assert.equal(parsed.source.sourceTabId, 7);
+  assert.deepEqual(parsed.selection, { branchId: '__all' });
+  assert.equal(parsed.branches[0].messageIds.length, 2);
+  assert.equal(parsed.assets[0].fileId, 'file-1');
+  assert.equal(parsed.messages[0].markdown, v2.messages[0].markdown);
+  assert.deepEqual(parsed.messages[0].assetIds, ['image-1']);
+  assert.doesNotMatch(JSON.stringify(parsed), /secret|accessToken|rawToken|dataUrl|files\.oaiusercontent|never export/i);
+});
+
+test('annotates branch ownership for all-branch exports in Markdown, text, HTML, and JSON', () => {
+  const branched = {
+    schemaVersion: 2,
+    title: '分支对话',
+    url: 'https://chatgpt.com/c/branches',
+    exportedAt: '2026-10-27T00:00:00.000Z',
+    selection: { branchId: '__all', ignored: 'secret' },
+    branches: [
+      { id: 'a', label: '路径 A', messageIds: ['shared', 'a1'] },
+      { id: 'b', label: '路径 B', messageIds: ['shared', 'b1'] }
+    ],
+    messages: [
+      { id: 'shared', role: 'user', markdown: '共同问题', text: '共同问题', html: '<p>共同问题</p>' },
+      { id: 'a1', role: 'assistant', markdown: '路径 A 的回答', text: '路径 A 的回答', html: '<p>路径 A 的回答</p>' },
+      { id: 'b1', role: 'assistant', markdown: '路径 B 的回答', text: '路径 B 的回答', html: '<p>路径 B 的回答</p>' }
+    ]
+  };
+  const markdown = global.GptExporter.serialize(branched, { format: 'markdown' }).content;
+  const text = global.GptExporter.serialize(branched, { format: 'text' }).content;
+  const html = global.GptExporter.serialize(branched, { format: 'html' }).content;
+  const json = JSON.parse(global.GptExporter.serialize(branched, { format: 'json' }).content);
+
+  assert.match(markdown, /所属分支：路径 A、路径 B/);
+  assert.match(markdown, /所属分支：路径 A\s+路径 A 的回答/);
+  assert.match(markdown, /所属分支：路径 B\s+路径 B 的回答/);
+  assert.match(text, /所属分支：路径 A、路径 B/);
+  assert.equal((html.match(/class=\"branch-affiliations\"/g) || []).length, 3);
+  assert.match(html, /<article data-message-id=\"shared\">/);
+  assert.deepEqual(json.selection, { branchId: '__all' });
+  assert.deepEqual(json.branches.map((branch) => branch.id), ['a', 'b']);
+
+  const selected = global.GptExporter.serialize({ ...branched, selection: { branchId: 'a' } }, {
+    format: 'text', messages: [branched.messages[1]]
+  }).content;
+  assert.doesNotMatch(selected, /所属分支/);
 });
 
 test('writes RFC 4180 CSV and prefixes formula-like data fields', () => {

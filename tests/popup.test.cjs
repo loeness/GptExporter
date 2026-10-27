@@ -26,9 +26,10 @@ function popup(options={}) {
 }
 test('popup uses active tab and reinjects the idempotent scripts when a listener is absent', async()=>{
   const env = popup({needsInjection:true}); await env.click();
-  assert.deepEqual(env.calls.map(call=>call[0]),['collect','inject','collect','open']);
-  assert.deepEqual(Array.from(env.calls[1][1].files),['src/conversation.js','src/content.js']);
-  assert.equal(env.calls[3][1].type,'GPT_EXPORTER_OPEN'); assert.equal(env.closed,true);
+  assert.deepEqual(env.calls.map(call=>call[0]),['collect','inject','inject','collect','open']);
+  assert.equal(env.calls[1][1].world,'MAIN');
+  assert.deepEqual(Array.from(env.calls[2][1].files),['src/conversation.js','src/history.js','src/content.js']);
+  assert.equal(env.calls[4][1].type,'GPT_EXPORTER_OPEN'); assert.equal(env.closed,true);
 });
 test('popup reports unsupported origins and collector failures without opening a reader', async()=>{
   for (const options of [{url:'https://chatgpt.com.evil.test/c/x'},{collectError:true}]) {

@@ -1,5 +1,7 @@
 # ChatGPT Exporter 6.13.2 静态检查
 
+下文“当前重写”对照表记录的是 1.0 基线。1.1 已新增会话树/API/共享/临时读取、媒体与本地 PDF，见 [升级说明](upgrade-1.1.md)；原版静态观察与证据范围保持不变。
+
 ## 范围
 
 检查对象为 Chrome 扩展 ID `ilmdofdhpnhffldihboadndccenlnfll`、版本 `6.13.2`。REA 分析记录的目标 SHA-256 为 `10c6fd3af2c5db5012a1ff64b19b33ecff78ec27d8743cbcabe5408901d8bf2d`；单文件 `inj.js` 的 SHA-256 为 `49c06173d4ead0aa293fb459774fc23583f3e42788f13bd40f4fcb8c80b3b83c`。

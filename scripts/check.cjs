@@ -28,6 +28,7 @@ for (const file of walk(root)) {
     }
   }
 }
-if (manifest.host_permissions?.length || manifest.externally_connectable) throw new Error('Unexpected broad permissions');
+const allowedHosts=['https://chatgpt.com/*','https://chat.openai.com/*','https://*.oaiusercontent.com/*','https://*.blob.core.windows.net/*'];
+if (JSON.stringify(manifest.host_permissions)!==JSON.stringify(allowedHosts)||manifest.externally_connectable) throw new Error('Unexpected host permissions');
 if (JSON.stringify([...manifest.permissions].sort()) !== JSON.stringify(['activeTab', 'scripting', 'storage'])) throw new Error('Unexpected permissions');
 console.log('Manifest resources, JavaScript syntax, local HTML references and CSP: OK');
