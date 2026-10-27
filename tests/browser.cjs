@@ -38,17 +38,15 @@ const fixture = `<!doctype html><html><head><meta charset="utf-8"><title>浏览�
     const chat = await context.newPage();
     await chat.goto('https://chatgpt.com/c/test-fixture');
     await chat.waitForSelector('#gpt-exporter-launcher');
-    // Exercise the actual content entry with keyboard access into its closed shadow root.
-    // A test-created extension page cannot simulate Chrome's action-granted activeTab.
-    let focused = false;
-    for (let step = 0; step < 12; step++) {
-      await chat.keyboard.press('Tab');
-      focused = await chat.evaluate(() => document.activeElement?.id === 'gpt-exporter-launcher');
-      if (focused) break;
-    }
-    assert.ok(focused, 'floating export entry is keyboard accessible');
+    // The open shadow root exposes the split-button controls to the browser test harness.
+    // Click the export action directly so the selection menu is never mistaken for export.
+    const entry = await chat.evaluate(() => {
+      const shadow = document.querySelector('#gpt-exporter-launcher')?.shadowRoot;
+      return {open: Boolean(shadow), hasExport: Boolean(shadow?.querySelector('#gpt-exporter-export'))};
+    });
+    assert.deepEqual(entry, {open: true, hasExport: true}, 'floating entry has an open shadow root and explicit export action');
     const readerPromise = context.waitForEvent('page');
-    await chat.keyboard.press('Enter');
+    await chat.locator('#gpt-exporter-export').click();
     const reader = await readerPromise;
     // Popup invalid-page feedback is tested separately from the action-granted permission.
     const popup = await context.newPage();
@@ -129,7 +127,7 @@ const fixture = `<!doctype html><html><head><meta charset="utf-8"><title>浏览�
     assert.deepEqual(errors, []);
     assert.deepEqual(unexpectedNetwork, []);
     const report = {status:'passed',chromium:context.browser()?.version() || 'persistent-context',checks:[
-      'MV3 load','keyboard content entry to reader','popup invalid-page feedback','three fixture messages','sanitized preview',
+      'MV3 load','page export entry to reader','popup invalid-page feedback','three fixture messages','sanitized preview',
       'role selection','search preserves selection','JSON selection download','standalone UTF-8 HTML',
       'PDF print layout','hidden/empty/error visibility','theme toggle','zero-selection protection','clipboard failure','mobile layout','session clear','missing session'
     ]};

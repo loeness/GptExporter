@@ -103,6 +103,7 @@
 
   function isDropped(element) {
     if (!element || element.nodeType !== 1) return false;
+    if (element.hasAttribute("data-gpt-exporter-selection")) return true;
     if (DROP_TAGS.has(element.tagName.toLowerCase())) return true;
     if (element.hasAttribute("hidden") || element.getAttribute("aria-hidden") === "true") return true;
     const testId = (element.getAttribute("data-testid") || "").toLowerCase();
@@ -426,6 +427,22 @@
     return id;
   }
 
+  // Use the same identity and candidate rules for page checkboxes and DOM export.
+  function messageElements(doc) {
+    const seen = new Set(), used = new Set(), entries = [];
+    for (const [index, candidate] of candidateNodes(doc).entries()) {
+      const explicitId = messageId(candidate.element, index);
+      if (explicitId && seen.has(explicitId)) continue;
+      if (explicitId) seen.add(explicitId);
+      let id = explicitId || `dom-position-${index + 1}`;
+      let suffix = 2;
+      while (used.has(id)) id = `${explicitId || `dom-position-${index + 1}`}#${suffix++}`;
+      used.add(id);
+      entries.push({ ...candidate, id, explicitId: Boolean(explicitId) });
+    }
+    return entries;
+  }
+
   function conversationTitle(doc) {
     const main = doc.querySelector("main");
     if (main) {
@@ -460,22 +477,10 @@
       };
     }
 
-    const candidates = candidateNodes(sourceDocument);
-    const seenMessageIds = new Set();
-    const usedIds = new Set();
-    for (const [index, candidate] of candidates.entries()) {
-      const explicitId = messageId(candidate.element, index);
-      if (explicitId && seenMessageIds.has(explicitId)) continue;
-      if (explicitId) seenMessageIds.add(explicitId);
-
-      let id = explicitId || `dom-position-${index + 1}`;
-      let suffix = 2;
-      while (usedIds.has(id)) id = `${explicitId || `dom-position-${index + 1}`}#${suffix++}`;
-      usedIds.add(id);
-
+    for (const candidate of messageElements(sourceDocument)) {
       const content = candidate.content;
       messages.push({
-        id,
+        id: candidate.id,
         role: candidate.role,
         markdown: finishMarkdown(markdownNode(content, sourceDocument)),
         text: finishText(textNode(content, sourceDocument, false)),
@@ -497,4 +502,6 @@
   }
 
   namespace.extractConversation = extractConversation;
+  namespace.messageElements = messageElements;
+  namespace.messageText = (element) => finishText(textNode(element, element.ownerDocument, false));
 })(globalThis);

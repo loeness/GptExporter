@@ -9,6 +9,7 @@
     conversation: null,
     storageKey: '',
     selected: new Set(),
+    selectionRule: {preset: 'all', overrides: new Map()},
     query: '',
     preferences: { includeMetadata: true, theme: 'light' },
     hasError: false,
@@ -238,6 +239,22 @@
     return branchMessages().filter((message) => state.selected.has(message.id));
   }
 
+  function applySelectionRule() {
+    const {preset, overrides} = state.selectionRule;
+    state.selected = new Set(branchMessages().filter(message => overrides.has(message.id) ? overrides.get(message.id) :
+      preset === 'all' || (preset === 'questions' && message.role === 'user') || (preset === 'answers' && message.role === 'assistant'))
+      .map(message => message.id));
+  }
+
+  function initializeSelectionRule() {
+    const initial = state.conversation.initialSelection;
+    const preset = ['all', 'questions', 'answers', 'none'].includes(initial?.preset) ? initial.preset : 'all';
+    state.selectionRule = {preset, overrides: new Map((Array.isArray(initial?.overrides) ? initial.overrides : [])
+      .filter(entry => entry && typeof entry.id === 'string' && typeof entry.selected === 'boolean')
+      .map(entry => [entry.id, entry.selected]))};
+    applySelectionRule();
+  }
+
   function currentConversation() {
     return Object.assign({}, state.conversation, { title: els['conversation-title'].value, selection:{branchId:state.branchId} });
   }
@@ -268,6 +285,7 @@
       checkbox.addEventListener('change', () => {
         if (checkbox.checked) state.selected.add(message.id);
         else state.selected.delete(message.id);
+        state.selectionRule.overrides.set(message.id, checkbox.checked);
         renderSelection();
       });
 
@@ -450,7 +468,7 @@
   function bindEvents() {
     els['branch-select'].addEventListener('change',()=>{
       state.branchId=els['branch-select'].value;
-      state.selected=new Set(branchMessages().map(message=>message.id));renderList();renderSelection();
+      applySelectionRule();renderList();renderSelection();
     });
     els['load-media'].addEventListener('click',async()=>{
       if(state.busy||!state.conversation)return;setBusy(true);
@@ -480,12 +498,8 @@
     root.document.querySelectorAll('[data-select]').forEach((button) => {
       button.addEventListener('click', () => {
         const action = button.dataset.select;
-        if (action === 'all') branchMessages().forEach((message) => state.selected.add(message.id));
-        else if (action === 'none') state.selected.clear();
-        else if (action === 'user' || action === 'assistant') {
-          state.selected.clear();
-          branchMessages().filter((message) => message.role === action).forEach((message) => state.selected.add(message.id));
-        }
+        state.selectionRule = {preset: action === 'user' ? 'questions' : action === 'assistant' ? 'answers' : action, overrides: new Map()};
+        applySelectionRule();
         renderList();
         renderSelection();
       });
@@ -514,7 +528,7 @@
       await loadConversation();
       clearLoadError();
       initializeBranches();
-      state.selected = new Set(branchMessages().map((message) => message.id));
+      initializeSelectionRule();
       els['conversation-title'].value = state.conversation.title;
       renderList();
       renderSelection();

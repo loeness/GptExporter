@@ -63,6 +63,31 @@ test('retains graph metadata but strips credentials and binary data from session
   const saved=env.records['export:'+result.id];assert.equal(saved.source.complete,true);
   assert.deepEqual(Array.from(saved.branches[0].messageIds),['1']);assert.ok(!JSON.stringify(saved).includes('never-store'));
 });
+test('keeps only valid page-selection presets and known boolean overrides',async()=>{
+  const env=setup();const input=model();
+  input.messages.push({id:'2',role:'assistant',markdown:'答复',text:'答复',html:'<p>答复</p>'});
+  input.initialSelection={preset:'questions',overrides:[
+    {id:'1',selected:false},
+    {id:'2',selected:true,untrusted:'strip-me'},
+    {id:'missing',selected:true},
+    {id:'2',selected:'yes'}
+  ],accessToken:'strip-me',unrelated:{body:'strip-me'}};
+  const result=await env.send({type:'GPT_EXPORTER_OPEN',conversation:input});
+  const saved=env.records['export:'+result.id];
+  assert.deepEqual(JSON.parse(JSON.stringify(saved.initialSelection)),{preset:'questions',overrides:[
+    {id:'1',selected:false},{id:'2',selected:true}
+  ]});
+  assert.ok(!JSON.stringify(saved).includes('strip-me'));
+});
+test('invalid page-selection presets cannot preserve partial overrides',async()=>{
+  const env=setup();const input=model();
+  input.initialSelection={preset:'admin',overrides:[{id:'1',selected:false}],extra:'discard'};
+  const result=await env.send({type:'GPT_EXPORTER_OPEN',conversation:input});
+  const saved=env.records['export:'+result.id];
+  assert.ok(!saved.initialSelection || saved.initialSelection.preset==='all');
+  assert.ok(!saved.initialSelection?.overrides?.length);
+  assert.ok(!JSON.stringify(saved).includes('discard'));
+});
 test('asset retrieval validates stored membership, sender, host and raster bytes',async()=>{
   const dataUrl='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==';
   const env=setup({resolvedAsset:{dataUrl}});const input=model();

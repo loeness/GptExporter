@@ -157,6 +157,36 @@ const html='<!doctype html><html><head><meta charset="utf-8"><title>Advanced fix
     assert.equal(await reader.locator('#preview-content article').count(),2);
     assert.doesNotMatch(await reader.locator('#preview-content').innerText(),/历史回答 8/);
     checks.push('branch switching and deduplicated all-branch selection');
+    // Presets apply to API history, even when only the last answer is mounted.
+    async function choosePagePreset(preset) {
+      await chat.bringToFront();
+      await chat.locator('#gpt-exporter-menu-toggle').click();
+      await chat.locator('[data-preset="'+preset+'"]').click();
+    }
+    await choosePagePreset('questions');
+    const questionsPromise=context.waitForEvent('page');await chat.locator('#gpt-exporter-export').click();
+    const questionsReader=await questionsPromise;await questionsReader.waitForSelector('#message-list input');
+    assert.equal(await questionsReader.locator('#message-list input:checked').count(),9);
+    await questionsReader.locator('#branch-select').selectOption('__all');
+    assert.equal(await questionsReader.locator('#message-list input:checked').count(),9);
+    await questionsReader.locator('#branch-select').selectOption(alternativeOption);
+    assert.equal(await questionsReader.locator('#message-list input:checked').count(),1);
+    assert.match(await questionsReader.locator('#preview-content').innerText(),/完整历史测试/);
+    await questionsReader.close();
+    checks.push('page Questions preset filters full history and follows branch switches');
+    await choosePagePreset('answers');
+    await chat.locator('[data-gpt-exporter-selection] input').uncheck();
+    const selectedModel=await worker.evaluate(async url=>{const [tab]=await chrome.tabs.query({url});return chrome.tabs.sendMessage(tab.id,{type:'GPT_EXPORTER_COLLECT'});},chat.url());
+    assert.equal(selectedModel.ok,true);
+    assert.deepEqual(selectedModel.conversation.initialSelection,{preset:'answers',overrides:[{id:'a8',selected:false}]});
+    const answersPromise=context.waitForEvent('page');await chat.locator('#gpt-exporter-export').click();
+    const answersReader=await answersPromise;await answersReader.waitForSelector('#message-list input');
+    assert.equal(await answersReader.locator('#message-list input:checked').count(),8);
+    await answersReader.locator('#branch-select').selectOption('__all');
+    assert.equal(await answersReader.locator('#message-list input:checked').count(),9);
+    assert.doesNotMatch(await answersReader.locator('#preview-content').innerText(),/历史回答 8/);
+    await answersReader.close();
+    checks.push('page manual override keeps stable API identity beyond mounted history');
     const shared=await collect('https://chatgpt.com/share/'+SID);assert.equal(shared.model.source.kind,'shared');assert.equal(shared.model.messages.length,19);await shared.page.close();
     checks.push('shared conversation API');
     const loaderPage=await context.newPage();

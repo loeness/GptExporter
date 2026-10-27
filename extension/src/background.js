@@ -45,6 +45,16 @@ function validateConversation(input) {
   };
   const messageIds = new Set(model.messages.map(message => message.id));
   if (messageIds.size !== model.messages.length) throw new Error('消息标识重复，请刷新后重试。');
+  if (['all', 'questions', 'answers', 'none'].includes(input.initialSelection?.preset)) {
+    const overrides = new Map();
+    for (const entry of (Array.isArray(input.initialSelection.overrides) ? input.initialSelection.overrides : []).slice(0, 20000)) {
+      if (entry && typeof entry.id === 'string' && messageIds.has(entry.id) && typeof entry.selected === 'boolean') {
+        overrides.set(entry.id, entry.selected);
+      }
+    }
+    model.initialSelection = {preset: input.initialSelection.preset,
+      overrides: [...overrides].map(([id, selected]) => ({id, selected}))};
+  }
   model.branches = (Array.isArray(input.branches) ? input.branches : []).slice(0, 2000).map((branch, index) => ({
     id: String(branch.id || index).slice(0, 250), label: String(branch.label || `分支 ${index + 1}`).slice(0, 160),
     leafId: String(branch.leafId || '').slice(0, 250),
