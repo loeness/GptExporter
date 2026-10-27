@@ -487,7 +487,7 @@
             svg.setAttribute('width',String(width));svg.setAttribute('height',String(height));
             const pixels=await svgCanvas(svg,document);
             if(pixels){
-              const image=new root.Image();image.src=pixels;await image.decode();
+              const image=await loadSnapshotImage(pixels,root.Image);
               const bounds=node.getBoundingClientRect();
               const targetWidth=Math.max(1,Math.ceil(bounds.width)||width),targetHeight=Math.max(1,Math.ceil(bounds.height)||height);
               const scale=Math.min(1,targetWidth/width,targetHeight/height);
@@ -514,6 +514,22 @@
     } catch (_) { return null; }
   }
 
+  function loadSnapshotImage(source, ImageCtor) {
+    return new Promise((resolve,reject) => {
+      const image = new ImageCtor();
+      const timer = root.setTimeout(() => finish(new Error('图片快照加载超时。')),10000);
+      function finish(error) {
+        root.clearTimeout(timer); image.onload = null; image.onerror = null;
+        if (error) reject(error); else resolve(image);
+      }
+      image.onload = () => finish();
+      image.onerror = () => finish(new Error('图片快照加载失败。'));
+      // onload does not depend on a rendering frame. Image.decode() can stay
+      // pending in an offscreen document; drawImage performs the final decode.
+      image.src = source;
+    });
+  }
+
   async function svgCanvas(svg, document) {
     const Serializer = document.defaultView && document.defaultView.XMLSerializer || root.XMLSerializer;
     const ImageCtor = document.defaultView && document.defaultView.Image || root.Image;
@@ -534,13 +550,7 @@
     const blob = new Blob([new Serializer().serializeToString(copy)], { type: 'image/svg+xml;charset=utf-8' });
     const objectUrl = URLApi.createObjectURL(blob);
     try {
-      const image = new ImageCtor();
-      const loaded = new Promise((resolve, reject) => {
-        image.onload = () => resolve();
-        image.onerror = () => reject(new Error('SVG rasterization failed'));
-      });
-      image.src = objectUrl;
-      await loaded;
+      const image = await loadSnapshotImage(objectUrl,ImageCtor);
       const canvas = document.createElement('canvas');
       canvas.width = width * 2;
       canvas.height = height * 2;

@@ -1,11 +1,19 @@
 'use strict';
 const {chromium}=require('playwright');
 const assert=require('node:assert/strict');
+const {execFileSync}=require('node:child_process');
 const fs=require('node:fs');
+const os=require('node:os');
 const path=require('node:path');
 const root=path.resolve(__dirname,'..');
+const chromiumExecutable=process.env.GPT_EXPORTER_CHROMIUM_EXECUTABLE||'';
+const chromiumLaunchOptions=chromiumExecutable?{executablePath:chromiumExecutable}:{channel:'chromium'};
+const bundledPython=path.join(os.homedir(),'.cache','codex-runtimes','codex-primary-runtime','dependencies','python','python.exe');
+const pythonExecutable=process.env.GPT_EXPORTER_TEST_PYTHON||(fs.existsSync(bundledPython)?bundledPython:'python');
 const output=path.join(root,'test-results','advanced-'+Date.now());
+const downloadsPath=path.join(output,'downloads');
 fs.mkdirSync(output,{recursive:true});
+fs.mkdirSync(downloadsPath,{recursive:true});
 const CID='11111111-1111-4111-8111-111111111111';
 const SID='22222222-2222-4222-8222-222222222222';
 const TID='33333333-3333-4333-8333-333333333333';
@@ -59,10 +67,32 @@ if True:
 }
 const html='<!doctype html><html><head><meta charset="utf-8"><title>Advanced fixture - ChatGPT</title></head><body><main><article data-testid="conversation-turn-1"><div data-message-author-role="assistant" data-message-id="a8"><p>页面只有最后一条。</p></div></article></main></body></html>';
 
+function readPdfContent(file){
+  const source=[
+    'import sys,json,base64',
+    'from pypdf import PdfReader',
+    'reader=PdfReader(sys.argv[1])',
+    "text='\\n'.join(page.extract_text() or '' for page in reader.pages)",
+    "attachments={name:[base64.b64encode(data).decode('ascii') for data in files] for name,files in reader.attachments.items()}",
+    'images=sum(len(page.images) for page in reader.pages)',
+    "print(json.dumps({'text':text,'images':images,'attachments':attachments},ensure_ascii=False))"
+  ].join(';');
+  return JSON.parse(execFileSync(pythonExecutable,['-c',source,file],{encoding:'utf8'}));
+}
+function renderPdfFirstPage(file,png){
+  const source="import sys; import pypdfium2 as pdfium; document=pdfium.PdfDocument(sys.argv[1]); document[0].render(scale=1.6).to_pil().save(sys.argv[2])";
+  execFileSync(pythonExecutable,['-c',source,file,png]);
+  return png;
+}
+function isPdfFile(file){
+  try{return fs.readFileSync(file).subarray(0,5).toString()==='%PDF-';}catch{return false;}
+}
+
 (async()=>{
   let context;const errors=[],outbound=[],checks=[];
   try{
-    context=await chromium.launchPersistentContext(path.join(output,'profile'),{channel:'chromium',headless:true,acceptDownloads:true,
+    if(chromiumExecutable)assert.ok(fs.existsSync(chromiumExecutable),'configured test Chromium executable is missing: '+chromiumExecutable);
+    context=await chromium.launchPersistentContext(path.join(output,'profile'),{...chromiumLaunchOptions,downloadsPath,headless:true,acceptDownloads:true,
       viewport:{width:1440,height:1000},args:['--disable-extensions-except='+path.join(root,'extension'),'--load-extension='+path.join(root,'extension')]});
     context.on('page',page=>page.on('pageerror',error=>errors.push({url:page.url(),error:error.stack||error.message})));
     await context.route(/^https?:\/\//,async route=>{
@@ -157,36 +187,87 @@ const html='<!doctype html><html><head><meta charset="utf-8"><title>Advanced fix
     assert.equal(await reader.locator('#preview-content article').count(),2);
     assert.doesNotMatch(await reader.locator('#preview-content').innerText(),/历史回答 8/);
     checks.push('branch switching and deduplicated all-branch selection');
-    // Presets apply to API history, even when only the last answer is mounted.
-    async function choosePagePreset(preset) {
+    // Quick presets must filter the complete active API branch, even though only a8 is mounted.
+    const pageUrlsBeforeQuick=context.pages().map(page=>page.url()).sort();
+    const sessionKeysBeforeQuick=await worker.evaluate(async()=>Object.keys(await chrome.storage.session.get(null)).filter(key=>key.startsWith('export:')).sort());
+    const chromeDownloads=()=>worker.evaluate(()=>chrome.downloads.search({}));
+    const quickStatus=()=>chat.evaluate(()=>{
+      const shadow=document.querySelector('#gpt-exporter-launcher')?.shadowRoot;
+      const status=shadow?.querySelector('.status');
+      return {text:status?.textContent||'',phase:status?.dataset.phase||status?.getAttribute('data-phase')||'',
+        selectDisabled:Boolean(shadow?.querySelector('#gpt-exporter-select')?.disabled)};
+    });
+    const waitForQuickPdf=async beforeIds=>{
+      const deadline=Date.now()+180000;
+      let nextProgress=0;
+      while(Date.now()<deadline){
+        const items=await chromeDownloads();
+        const created=items.filter(item=>!beforeIds.has(item.id));
+        const interrupted=created.find(item=>item.state==='interrupted');
+        if(interrupted)throw new Error('Quick PDF download was interrupted: '+(interrupted.error||interrupted.filename));
+        const completed=created.find(item=>item.state==='complete'&&fs.existsSync(item.filename)&&isPdfFile(item.filename));
+        if(completed)return completed;
+        if(Date.now()>=nextProgress){
+          const status=await quickStatus();
+          const snapshot={updatedAt:new Date().toISOString(),status};
+          fs.writeFileSync(path.join(output,'quick-export-status.json'),JSON.stringify(snapshot,null,2));
+          console.log('Quick export progress: '+JSON.stringify(status));
+          nextProgress=Date.now()+10000;
+          if(status.text&&!status.text.startsWith('正在')&&!status.text.startsWith('已导出'))throw new Error('Quick export reported an error before downloading: '+JSON.stringify(status));
+        }
+        await new Promise(resolve=>setTimeout(resolve,200));
+      }
+      throw new Error('Timed out waiting for a completed quick PDF download; page status: '+JSON.stringify(await quickStatus()));
+    };
+    const quickPdf=async(preset,count)=>{
       await chat.bringToFront();
+      const beforeIds=new Set((await chromeDownloads()).map(item=>item.id));
       await chat.locator('#gpt-exporter-menu-toggle').click();
-      await chat.locator('[data-preset="'+preset+'"]').click();
-    }
-    await choosePagePreset('questions');
-    const questionsPromise=context.waitForEvent('page');await chat.locator('#gpt-exporter-export').click();
-    const questionsReader=await questionsPromise;await questionsReader.waitForSelector('#message-list input');
-    assert.equal(await questionsReader.locator('#message-list input:checked').count(),9);
-    await questionsReader.locator('#branch-select').selectOption('__all');
-    assert.equal(await questionsReader.locator('#message-list input:checked').count(),9);
-    await questionsReader.locator('#branch-select').selectOption(alternativeOption);
-    assert.equal(await questionsReader.locator('#message-list input:checked').count(),1);
-    assert.match(await questionsReader.locator('#preview-content').innerText(),/完整历史测试/);
-    await questionsReader.close();
-    checks.push('page Questions preset filters full history and follows branch switches');
-    await choosePagePreset('answers');
-    await chat.locator('[data-gpt-exporter-selection] input').uncheck();
-    const selectedModel=await worker.evaluate(async url=>{const [tab]=await chrome.tabs.query({url});return chrome.tabs.sendMessage(tab.id,{type:'GPT_EXPORTER_COLLECT'});},chat.url());
-    assert.equal(selectedModel.ok,true);
-    assert.deepEqual(selectedModel.conversation.initialSelection,{preset:'answers',overrides:[{id:'a8',selected:false}]});
-    const answersPromise=context.waitForEvent('page');await chat.locator('#gpt-exporter-export').click();
-    const answersReader=await answersPromise;await answersReader.waitForSelector('#message-list input');
-    assert.equal(await answersReader.locator('#message-list input:checked').count(),8);
-    await answersReader.locator('#branch-select').selectOption('__all');
-    assert.equal(await answersReader.locator('#message-list input:checked').count(),9);
-    assert.doesNotMatch(await answersReader.locator('#preview-content').innerText(),/历史回答 8/);
-    await answersReader.close();
-    checks.push('page manual override keeps stable API identity beyond mounted history');
+      await chat.locator('#gpt-exporter-selection-menu [data-preset="'+preset+'"]').click();
+      const item=await waitForQuickPdf(beforeIds);
+      assert.deepEqual(context.pages().map(page=>page.url()).sort(),pageUrlsBeforeQuick,'quick PDF export must not open tabs or a reader page');
+      assert.equal(await chat.locator('[data-gpt-exporter-selection]').count(),0,'quick export must not add message selection controls');
+      await chat.waitForFunction(expected=>{
+        const shadow=document.querySelector('#gpt-exporter-launcher')?.shadowRoot;
+        return shadow?.querySelector('.status')?.textContent.includes('已导出 '+expected+' 条消息为 PDF') &&
+          !shadow?.querySelector('#gpt-exporter-select')?.disabled;
+      },count);
+      const status=await chat.evaluate(()=>document.querySelector('#gpt-exporter-launcher')?.shadowRoot?.querySelector('.status')?.textContent||'');
+      assert.match(status,new RegExp('已导出 '+count+' 条消息为 PDF'));
+      const sessionKeys=await worker.evaluate(async()=>Object.keys(await chrome.storage.session.get(null)).filter(key=>key.startsWith('export:')).sort());
+      assert.deepEqual(sessionKeys,sessionKeysBeforeQuick,'quick export session data is removed after download');
+      const offscreen=await worker.evaluate(async()=>{
+        const contexts=await chrome.runtime.getContexts({contextTypes:['OFFSCREEN_DOCUMENT']});
+        return contexts.filter(context=>context.documentUrl===chrome.runtime.getURL('direct-export.html')).length;
+      });
+      assert.equal(offscreen,0,'quick export closes its offscreen document after download');
+      return {file:item.filename,...readPdfContent(item.filename)};
+    };
+    const allQuick=await quickPdf('all',18);const allQuickText=allQuick.text;
+    assert.match(allQuickText,/完整历史测试：请保留数学、图表和附件/);
+    assert.match(allQuickText,/历史问题 8/);
+    assert.match(allQuickText,/历史回答 8\.10/);
+    assert.doesNotMatch(allQuickText,/另一个分支的回答/,'All must not include the alternative branch');
+    assert.equal((allQuickText.match(/历史问题 \d+，/g)||[]).length,8,'All includes the eight historical user turns');
+    assert.equal((allQuickText.match(/历史回答 \d+\.\d+：/g)||[]).length,80,'All includes all eight numbered historical assistant answers');
+    assert.ok(allQuick.images>=4,'All quick PDF embeds the source image, two formula snapshots, and Mermaid diagram');
+    assert.ok(allQuick.attachments['notes.txt']?.length,'All quick PDF embeds the notes.txt attachment');
+    assert.equal(allQuick.attachments['notes.txt'][0],Buffer.from('附件原始内容：保留字节。\nfixture attachment\n','utf8').toString('base64'));
+    const quickPdfPreviewPath=renderPdfFirstPage(allQuick.file,path.join(output,'quick-all-page-1.png'));
+    checks.push('All quick PDF contains complete current-branch history, four raster images, and the original notes.txt attachment');
+    const questionsQuick=await quickPdf('questions',9);const questionsQuickText=questionsQuick.text;
+    assert.match(questionsQuickText,/完整历史测试：请保留数学、图表和附件/);
+    for(let index=1;index<=8;index++)assert.match(questionsQuickText,new RegExp('历史问题 '+index));
+    assert.doesNotMatch(questionsQuickText,/历史回答 \d+\./,'Questions quick PDF contains user messages only');
+    assert.doesNotMatch(questionsQuickText,/另一个分支的回答/);
+    checks.push('Questions quick PDF contains all nine user messages beyond mounted DOM only');
+    const answersQuick=await quickPdf('answers',9);const answersQuickText=answersQuick.text;
+    assert.match(answersQuickText,/可搜索文字：精确还原测试 ABC123/);
+    assert.match(answersQuickText,/历史回答 8\.10/);
+    assert.doesNotMatch(answersQuickText,/完整历史测试：请保留数学、图表和附件|历史问题 \d+/,'Answers quick PDF contains assistant messages only');
+    assert.doesNotMatch(answersQuickText,/另一个分支的回答/);
+    assert.equal((answersQuickText.match(/历史回答 \d+\.\d+：/g)||[]).length,80,'Answers contains all eight numbered historical assistant answers');
+    checks.push('Answers quick PDF contains assistant history only');
     const shared=await collect('https://chatgpt.com/share/'+SID);assert.equal(shared.model.source.kind,'shared');assert.equal(shared.model.messages.length,19);await shared.page.close();
     checks.push('shared conversation API');
     const loaderPage=await context.newPage();
@@ -203,7 +284,8 @@ const html='<!doctype html><html><head><meta charset="utf-8"><title>Advanced fix
     const partial=await collect('https://chatgpt.com/c/'+denied);assert.equal(partial.model.source.complete,false);assert.equal(partial.model.messages.length,1);await partial.page.close();
     checks.push('403 fallback visibly marked partial');
     assert.deepEqual(errors,[]);assert.deepEqual(outbound,[]);
-    const report={status:'passed',chromium:context.browser().version(),checks,pdfPath,htmlPath};
+    const report={status:'passed',chromium:context.browser().version(),checks,pdfPath,htmlPath,quickPdfPreviewPath,
+      quickPdfPaths:{all:allQuick.file,questions:questionsQuick.file,answers:answersQuick.file}};
     fs.writeFileSync(path.join(output,'result.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
   }catch(error){fs.writeFileSync(path.join(output,'failure.txt'),error.stack||String(error));console.error(error);process.exitCode=1;}
   finally{if(context)await context.close();}

@@ -6,21 +6,33 @@ const fs = require('node:fs');
 const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '../extension/src/background.js'), 'utf8');
 function setup(options = {}) {
-  const records = {...options.records}; const tabs = []; let listener;
+  const records = {...options.records}; const tabs = [], downloads = [], renders = [];
+  const documents = {created:0,closed:0}; const downloadListeners = new Set(); let listener;
   const chrome = {
-    runtime: {id: 'test-id', getURL: value => 'chrome-extension://test-id/' + value, onMessage: {addListener(value) { listener = value; }}},
+    runtime: {id: 'test-id', getURL: value => 'chrome-extension://test-id/' + value, onMessage: {addListener(value) { listener = value; }},
+      async getContexts(){return [];},async getPlatformInfo(){return {};},async sendMessage(message){
+        if(message.type==='GPT_EXPORTER_DIRECT_RELEASE')return {ok:true};
+        renders.push(JSON.parse(JSON.stringify(message)));
+        if(options.render)return options.render(message,send);
+        return options.failRender?{ok:false,error:'fixture render failed'}:{ok:true,url:'blob:chrome-extension://test-id/generated',missingAssets:0};
+      }},
     storage: {session: {
       async get() { return {...records}; }, async set(values) { Object.assign(records, values); },
       async remove(keys) { for (const key of Array.isArray(keys) ? keys : [keys]) delete records[key]; }
     }},
     tabs: {async create(value) { if (options.failOpen) throw new Error('tab failed'); tabs.push(value); },
-      async sendMessage(){return {ok:true,asset:options.resolvedAsset||{url:'https://files.oaiusercontent.com/fixture'}};}}
+      async sendMessage(){return {ok:true,asset:options.resolvedAsset||{url:'https://files.oaiusercontent.com/fixture'}};}},
+    offscreen:{async createDocument(){documents.created++;},async closeDocument(){documents.closed++;}},
+    downloads:{async download(value){if(options.failDownload)throw new Error('fixture download failed');downloads.push(value);return downloads.length;},
+      async search(){return [{state:options.interrupted?'interrupted':'complete',...(options.interrupted?{error:'USER_CANCELED'}:{})}];},
+      async cancel(){},onChanged:{addListener(value){downloadListeners.add(value);},removeListener(value){downloadListeners.delete(value);}}}
   };
-  vm.runInNewContext(source, {chrome, TextEncoder, URL, crypto: require('node:crypto').webcrypto, Date,atob:options.atob||atob,btoa,AbortSignal,
+  vm.runInNewContext(source, {chrome, TextEncoder, URL, crypto: require('node:crypto').webcrypto, Date,atob:options.atob||atob,btoa,AbortSignal,setTimeout,clearTimeout,setInterval,clearInterval,
     fetch:options.fetch||async function(){throw new Error('network disabled in test');}});
-  return {records, tabs, send(message, sender = {id: 'test-id', url: 'https://chatgpt.com/c/test'}) {
+  function send(message, sender = {id: 'test-id', url: 'https://chatgpt.com/c/test'}) {
     return new Promise(resolve => { const pending = listener(message, sender, resolve); if (pending === false) resolve(undefined); });
-  }};
+  }
+  return {records,tabs,downloads,renders,documents,downloadListeners,send};
 }
 const model = () => ({schemaVersion: 1, title: 'Hello', url: 'https://chatgpt.com/c/test', messages: [
   {id: '1', role: 'user', markdown: '你好', text: '你好', html: '<p>你好</p>'}
@@ -63,30 +75,68 @@ test('retains graph metadata but strips credentials and binary data from session
   const saved=env.records['export:'+result.id];assert.equal(saved.source.complete,true);
   assert.deepEqual(Array.from(saved.branches[0].messageIds),['1']);assert.ok(!JSON.stringify(saved).includes('never-store'));
 });
-test('keeps only valid page-selection presets and known boolean overrides',async()=>{
-  const env=setup();const input=model();
-  input.messages.push({id:'2',role:'assistant',markdown:'答复',text:'答复',html:'<p>答复</p>'});
-  input.initialSelection={preset:'questions',overrides:[
-    {id:'1',selected:false},
-    {id:'2',selected:true,untrusted:'strip-me'},
-    {id:'missing',selected:true},
-    {id:'2',selected:'yes'}
-  ],accessToken:'strip-me',unrelated:{body:'strip-me'}};
-  const result=await env.send({type:'GPT_EXPORTER_OPEN',conversation:input});
-  const saved=env.records['export:'+result.id];
-  assert.deepEqual(JSON.parse(JSON.stringify(saved.initialSelection)),{preset:'questions',overrides:[
-    {id:'1',selected:false},{id:'2',selected:true}
-  ]});
-  assert.ok(!JSON.stringify(saved).includes('strip-me'));
+function branchedModel(){
+  const input=model();input.schemaVersion=2;
+  for(const [id,role] of [['2','assistant'],['3','user'],['4','assistant'],['alt','assistant']])input.messages.push({id,role,markdown:id,text:id,html:'<p>'+id+'</p>'});
+  input.branches=[{id:'current',messageIds:['1','2','3','4']},{id:'other',messageIds:['1','alt']}];input.activeBranchId='current';
+  input.assets=[{id:'kept',messageId:'2',kind:'attachment'},{id:'excluded',messageId:'alt',kind:'attachment'}];
+  return input;
+}
+test('quick All Questions Answers download only the current branch and scoped media without a tab',async()=>{
+  for(const [preset,ids] of [['all',['1','2','3','4']],['questions',['1','3']],['answers',['2','4']]]){
+    const env=setup();const result=await env.send({type:'GPT_EXPORTER_QUICK',conversation:branchedModel(),preset,format:'pdf'});
+    assert.equal(result.ok,true);assert.equal(result.count,ids.length);assert.equal(env.tabs.length,0);
+    assert.deepEqual(env.renders[0].conversation.messages.map(message=>message.id),ids);
+    assert.deepEqual(env.renders[0].conversation.assets.map(asset=>asset.id),preset==='questions'?[]:['kept']);
+    assert.equal(env.downloads[0].saveAs,false);assert.equal(env.downloads[0].conflictAction,'uniquify');
+    assert.match(env.downloads[0].filename,/\.pdf$/);assert.deepEqual(env.documents,{created:1,closed:1});
+    assert.deepEqual(Object.keys(env.records),[]);assert.equal(env.downloadListeners.size,0);
+  }
 });
-test('invalid page-selection presets cannot preserve partial overrides',async()=>{
-  const env=setup();const input=model();
-  input.initialSelection={preset:'admin',overrides:[{id:'1',selected:false}],extra:'discard'};
-  const result=await env.send({type:'GPT_EXPORTER_OPEN',conversation:input});
-  const saved=env.records['export:'+result.id];
-  assert.ok(!saved.initialSelection || saved.initialSelection.preset==='all');
-  assert.ok(!saved.initialSelection?.overrides?.length);
-  assert.ok(!JSON.stringify(saved).includes('discard'));
+test('quick export rejects empty roles, invalid options and untrusted callers before rendering',async()=>{
+  const env=setup();
+  const truncated=branchedModel();truncated.branches=Array.from({length:2001},(_,index)=>({id:'b'+index,messageIds:['1']}));truncated.activeBranchId='b2000';
+  const missing=branchedModel();missing.activeBranchId='missing';
+  for(const message of [
+    {type:'GPT_EXPORTER_QUICK',conversation:model(),preset:'answers'},
+    {type:'GPT_EXPORTER_QUICK',conversation:model(),preset:'none'},
+    {type:'GPT_EXPORTER_QUICK',conversation:model(),preset:'all',format:'__proto__'},
+    {type:'GPT_EXPORTER_QUICK',conversation:truncated,preset:'all'},
+    {type:'GPT_EXPORTER_QUICK',conversation:missing,preset:'all'}
+  ])assert.equal((await env.send(message)).ok,false);
+  assert.equal((await env.send({type:'GPT_EXPORTER_QUICK',conversation:model(),preset:'all'},{id:'test-id',url:'https://evil.invalid/'})).ok,false);
+  assert.equal(env.renders.length,0);assert.equal(env.downloads.length,0);assert.equal(env.documents.created,0);
+});
+test('quick export cleans temporary state after renderer, download and interruption failures',async()=>{
+  for(const options of [{failRender:true},{failDownload:true},{interrupted:true}]){
+    const env=setup(options);const result=await env.send({type:'GPT_EXPORTER_QUICK',conversation:model(),preset:'all'});
+    assert.equal(result.ok,false);assert.equal(env.documents.closed,1);assert.equal(env.tabs.length,0);
+    assert.deepEqual(Object.keys(env.records),[]);assert.equal(env.downloadListeners.size,0);
+  }
+});
+test('a simultaneous quick request is rejected without disturbing the active job or later requests',async()=>{
+  const env=setup();
+  const request={type:'GPT_EXPORTER_QUICK',conversation:model(),preset:'all'};
+  const first=env.send(request);
+  assert.equal((await env.send(request)).ok,false);
+  assert.equal((await first).ok,true);
+  assert.equal((await env.send(request)).ok,true);
+  assert.equal(env.downloads.length,2);assert.equal(env.documents.created,2);assert.equal(env.documents.closed,2);
+  assert.deepEqual(Object.keys(env.records),[]);
+});
+test('offscreen asset broker authorizes only the active job and rejects stale IDs or tab senders',async()=>{
+  let activeId;
+  const env=setup({resolvedAsset:{dataUrl:'data:text/plain;base64,b2s='},async render(message,send){
+    activeId=message.exportId;const sender={id:'test-id',url:'chrome-extension://test-id/direct-export.html'};
+    const request={type:'GPT_EXPORTER_ASSET',exportId:activeId,assetId:'f'};
+    assert.equal((await send(request,sender)).ok,true);
+    assert.equal((await send({...request,exportId:'stale'},sender)).ok,false);
+    assert.equal((await send(request,{...sender,tab:{id:2}})).ok,false);
+    return {ok:true,url:'blob:chrome-extension://test-id/generated'};
+  }});
+  const input=model();input.source={kind:'api',sourceTabId:7};input.assets=[{id:'f',messageId:'1',kind:'attachment'}];
+  assert.equal((await env.send({type:'GPT_EXPORTER_QUICK',conversation:input,preset:'all'})).ok,true);
+  assert.equal((await env.send({type:'GPT_EXPORTER_ASSET',exportId:activeId,assetId:'f'},{id:'test-id',url:'chrome-extension://test-id/direct-export.html'})).ok,false);
 });
 test('asset retrieval validates stored membership, sender, host and raster bytes',async()=>{
   const dataUrl='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==';

@@ -5,6 +5,10 @@ const SESSION_PREFIX = 'export:';
 const MAX_BYTES = 8 * 1024 * 1024;
 const MAX_AGE = 24 * 60 * 60 * 1000;
 let openQueue = Promise.resolve();
+let activeDirectId = '';
+let quickPending = false;
+let activeDirectTabId;
+let directPhase = '准备文档';
 
 function supportedPage(value) {
   try {
@@ -45,23 +49,16 @@ function validateConversation(input) {
   };
   const messageIds = new Set(model.messages.map(message => message.id));
   if (messageIds.size !== model.messages.length) throw new Error('消息标识重复，请刷新后重试。');
-  if (['all', 'questions', 'answers', 'none'].includes(input.initialSelection?.preset)) {
-    const overrides = new Map();
-    for (const entry of (Array.isArray(input.initialSelection.overrides) ? input.initialSelection.overrides : []).slice(0, 20000)) {
-      if (entry && typeof entry.id === 'string' && messageIds.has(entry.id) && typeof entry.selected === 'boolean') {
-        overrides.set(entry.id, entry.selected);
-      }
-    }
-    model.initialSelection = {preset: input.initialSelection.preset,
-      overrides: [...overrides].map(([id, selected]) => ({id, selected}))};
-  }
+  if (Array.isArray(input.branches) && input.branches.length > 2000) throw new Error('对话分支超过 2,000 个，无法确认当前分支，本次导出已停止。');
   model.branches = (Array.isArray(input.branches) ? input.branches : []).slice(0, 2000).map((branch, index) => ({
     id: String(branch.id || index).slice(0, 250), label: String(branch.label || `分支 ${index + 1}`).slice(0, 160),
     leafId: String(branch.leafId || '').slice(0, 250),
     messageIds: Array.isArray(branch.messageIds) ? branch.messageIds.map(String).filter(id => messageIds.has(id)).slice(0, 20000) : []
   }));
   if (!model.branches.length) model.branches = [{id:'current',label:'当前页面',leafId:model.messages.at(-1).id,messageIds:[...messageIds]}];
-  model.activeBranchId = model.branches.some(branch => branch.id === input.activeBranchId) ? input.activeBranchId : model.branches[0].id;
+  const hasActiveBranch = model.branches.some(branch => branch.id === input.activeBranchId);
+  if (input.activeBranchId && !hasActiveBranch) throw new Error('无法确认当前对话分支，请刷新对话后重试。');
+  model.activeBranchId = hasActiveBranch ? input.activeBranchId : model.branches[0].id;
   model.source = {
     kind: ['api','shared','temporary','dom'].includes(input.source?.kind) ? input.source.kind : 'dom',
     complete: input.source?.complete === true,
@@ -79,11 +76,15 @@ function validateConversation(input) {
   return model;
 }
 
-async function openExport(input, sender) {
+function modelFromSender(input, sender) {
   const model = validateConversation(input);
   const fromPopup = sender?.url === chrome.runtime.getURL('popup.html');
   model.source.sourceTabId = !fromPopup && Number.isInteger(sender?.tab?.id) ? sender.tab.id :
     (Number.isInteger(input.source?.sourceTabId) ? input.source.sourceTabId : undefined);
+  return model;
+}
+
+async function storeExport(model) {
   const records = await chrome.storage.session.get(null);
   const entries = Object.entries(records).filter(([key]) => key.startsWith(SESSION_PREFIX));
   const stale = entries.filter(([, value]) => !value?.createdAt || Date.now() - value.createdAt > MAX_AGE);
@@ -98,6 +99,11 @@ async function openExport(input, sender) {
   const id = crypto.randomUUID();
   const key = SESSION_PREFIX + id;
   await chrome.storage.session.set({[key]: model});
+  return {id, key};
+}
+
+async function openExport(input, sender) {
+  const {id, key} = await storeExport(modelFromSender(input, sender));
   try {
     await chrome.tabs.create({url: chrome.runtime.getURL('reader.html?id=' + id)});
   } catch (error) {
@@ -105,6 +111,95 @@ async function openExport(input, sender) {
     throw error;
   }
   return {ok: true, id};
+}
+
+function quickModel(input, sender, preset) {
+  if (!['all', 'questions', 'answers'].includes(preset)) throw new Error('快捷导出范围无效。');
+  const model = modelFromSender(input, sender);
+  const branch = model.branches.find(item => item.id === model.activeBranchId);
+  const byId = new Map(model.messages.map(message => [message.id, message]));
+  model.messages = [...new Set(branch.messageIds)].map(id => byId.get(id)).filter(message => message &&
+    (preset === 'all' || message.role === (preset === 'questions' ? 'user' : 'assistant')));
+  if (!model.messages.length) throw new Error(preset === 'questions' ? '当前分支没有可导出的提问。' : preset === 'answers' ? '当前分支没有可导出的回答。' : '当前分支没有可导出的消息。');
+  const ids = new Set(model.messages.map(message => message.id));
+  const assetIds = new Set(model.messages.flatMap(message => message.assetIds));
+  model.assets = model.assets.filter(asset => ids.has(asset.messageId) || assetIds.has(asset.id));
+  model.branches = [{...branch, messageIds:model.messages.map(message => message.id),leafId:model.messages.at(-1).id}];
+  model.title += ' - ' + ({all:'All',questions:'Questions',answers:'Answers'})[preset];
+  return model;
+}
+
+function withTimeout(promise, milliseconds, message) {
+  let timer;
+  return Promise.race([promise,new Promise((_,reject) => { timer = setTimeout(() => reject(new Error(typeof message === 'function' ? message() : message)),milliseconds); })])
+    .finally(() => clearTimeout(timer));
+}
+
+async function waitForDownload(id) {
+  let listener;
+  const pending = new Promise((resolve,reject) => {
+    function inspect(item) {
+      const state = typeof item.state === 'string' ? item.state : item.state?.current;
+      const error = typeof item.error === 'string' ? item.error : item.error?.current;
+      if (state === 'complete') resolve();
+      else if (state === 'interrupted' || error) reject(new Error('下载中断：' + (error || '文件未保存，请重试。')));
+    }
+    listener = delta => { if (delta.id === id) inspect(delta); };
+    chrome.downloads.onChanged.addListener(listener);
+    // The file can complete before onChanged is registered; inspect only our ID.
+    chrome.downloads.search({id}).then(items => {
+      if (items.length) inspect(items[0]); else reject(new Error('未找到本次下载记录。'));
+    },reject);
+  });
+  try { await withTimeout(pending,90000,'下载等待超时，请检查浏览器下载列表。'); }
+  catch (error) { await chrome.downloads.cancel(id).catch(() => {}); throw error; }
+  finally { chrome.downloads.onChanged.removeListener(listener); }
+}
+
+async function quickExport(message, sender) {
+  const format = message.format || 'pdf';
+  const extensions = {pdf:'pdf',markdown:'md',html:'html',text:'txt',json:'json',csv:'csv'};
+  if (!Object.hasOwn(extensions,format)) throw new Error('快捷导出格式无效。');
+  if (!chrome.offscreen?.createDocument || !chrome.downloads?.download) throw new Error('浏览器不支持后台导出，请使用 SELECT 打开导出页面。');
+  const model = quickModel(message.conversation,sender,message.preset);
+  const {id,key} = await storeExport(model);
+  let offscreen = false;
+  // Keep the worker responsive during long local rendering/media requests.
+  const keepAlive = setInterval(() => { chrome.runtime.getPlatformInfo().catch(() => {}); },20000);
+  activeDirectId = id;
+  activeDirectTabId = model.source.sourceTabId; directPhase = '准备文档';
+  try {
+    const documentUrl = chrome.runtime.getURL('direct-export.html');
+    const contexts = typeof chrome.runtime.getContexts === 'function'
+      ? await chrome.runtime.getContexts({contextTypes:['OFFSCREEN_DOCUMENT'],documentUrls:[documentUrl]})
+      : await globalThis.clients.matchAll();
+    if (!contexts.some(context => (context.documentUrl || context.url) === documentUrl)) {
+      await chrome.offscreen.createDocument({url:'direct-export.html',reasons:['BLOBS','DOM_PARSER'],
+        justification:'在本机渲染所选对话并生成下载文件，无需打开导出标签页。'});
+    }
+    offscreen = true;
+    const result = await withTimeout(chrome.runtime.sendMessage({type:'GPT_EXPORTER_DIRECT_RENDER',exportId:id,format,conversation:model}),
+      150000,() => `本地文件生成超时（${directPhase}），请使用 SELECT 打开导出页面重试。`);
+    if (!result?.ok) throw new Error(result?.error || '后台文件生成失败。');
+    if (typeof result.url !== 'string' || !result.url.startsWith('blob:' + chrome.runtime.getURL(''))) throw new Error('后台返回的下载地址无效。');
+    const baseName = model.title.replace(/[\\/:*?"<>|\u0000-\u001f\u007f]/g,'-').replace(/\s+/g,' ').replace(/[. ]+$/,'').trim().slice(0,100) || '对话导出';
+    const filename = baseName + '.' + extensions[format];
+    const downloadId = await chrome.downloads.download({url:result.url,filename,saveAs:false,conflictAction:'uniquify'});
+    if (!Number.isInteger(downloadId)) throw new Error('浏览器未能启动下载。');
+    await waitForDownload(downloadId);
+    return {ok:true,count:model.messages.length,format,downloadId,missingAssets:Number.isInteger(result.missingAssets)?result.missingAssets:0};
+  } finally {
+    clearInterval(keepAlive);
+    const failures = [];
+    if (offscreen) {
+      await withTimeout(chrome.runtime.sendMessage({type:'GPT_EXPORTER_DIRECT_RELEASE',exportId:id}),3000,'释放临时文档超时。').catch(() => {});
+      try { await chrome.offscreen.closeDocument(); } catch (error) { failures.push(error); }
+    }
+    activeDirectId = '';
+    activeDirectTabId = undefined;
+    try { await chrome.storage.session.remove(key); } catch (error) { failures.push(error); }
+    if (failures.length) throw new Error('快捷导出已结束，但临时数据清理失败，请重新加载扩展。');
+  }
 }
 
 function approvedMediaUrl(value) {
@@ -172,15 +267,32 @@ async function loadAsset(message) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
+  if (message?.type === 'GPT_EXPORTER_DIRECT_PROGRESS') {
+    if (sender.id !== chrome.runtime.id || sender.tab || sender.url !== chrome.runtime.getURL('direct-export.html') ||
+        !activeDirectId || message.exportId !== activeDirectId) { respond({ok:false}); return false; }
+    const phases = {assets:'读取图片与附件',render:'渲染公式与图表',snapshot:'生成富内容快照',pdf:'生成 PDF 文件'};
+    if (!Object.hasOwn(phases,message.phase)) { respond({ok:false}); return false; }
+    directPhase = phases[message.phase];
+    if (Number.isInteger(activeDirectTabId)) chrome.tabs.sendMessage(activeDirectTabId,{type:'GPT_EXPORTER_PROGRESS',text:'正在' + directPhase + '…'}).catch(() => {});
+    respond({ok:true}); return false;
+  }
   if (message?.type === 'GPT_EXPORTER_ASSET') {
-    if (!readerSender(sender)) { respond({ok:false,error:'来源未授权。'}); return false; }
+    const offscreenSender = sender.id === chrome.runtime.id && !sender.tab && sender.url === chrome.runtime.getURL('direct-export.html') &&
+      activeDirectId && message.exportId === activeDirectId;
+    if (!readerSender(sender) && !offscreenSender) { respond({ok:false,error:'来源未授权。'}); return false; }
     loadAsset(message).then(respond).catch(error => respond({ok:false,error:error.message || '附件读取失败。'}));
     return true;
   }
-  if (message?.type !== 'GPT_EXPORTER_OPEN') return false;
+  if (!['GPT_EXPORTER_OPEN','GPT_EXPORTER_QUICK'].includes(message?.type)) return false;
   if (!trustedSender(sender)) { respond({ok: false, error: '来源未授权。'}); return false; }
-  const work = openQueue.then(() => openExport(message.conversation, sender));
+  const direct = message.type === 'GPT_EXPORTER_QUICK';
+  if (direct && quickPending) { respond({ok:false,error:'已有快捷导出正在处理，请稍后重试。'}); return false; }
+  if (direct) quickPending = true;
+  const work = openQueue.then(() => message.type === 'GPT_EXPORTER_QUICK' ? quickExport(message,sender) : openExport(message.conversation,sender));
   openQueue = work.catch(() => {});
-  work.then(respond).catch(error => respond({ok: false, error: error.message || '无法打开预览，请重试。'}));
+  work.then(result => { if (direct) quickPending = false; respond(result); },error => {
+    if (direct) quickPending = false;
+    respond({ok:false,error:error.message || '导出失败，请重试。'});
+  });
   return true;
 });
