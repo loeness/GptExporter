@@ -54,7 +54,7 @@
     {
       id: "kimi",
       label: "Kimi",
-      hosts: ["kimi.com", "www.kimi.com", "kimi.moonshot.cn"],
+      hosts: ["kimi.ai", "www.kimi.ai", "kimi.com", "www.kimi.com", "kimi.moonshot.cn"],
       scopes: [".chat-content-list", "main", "[role='main']"],
       messages: [
         { selector: ".chat-content-item-user", role: "user", contentSelector: ".segment-content" },

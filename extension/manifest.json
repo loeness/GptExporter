@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "GptExporter · 对话导出",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "minimum_chrome_version": "114",
   "description": "本地导出 ChatGPT、Claude、Qwen、DeepSeek、Kimi、Gemini、豆包和 Grok 对话，支持 PDF、Markdown、HTML 等格式。",
   "permissions": ["storage", "activeTab", "scripting", "offscreen", "downloads"],
@@ -12,7 +12,7 @@
     "default_icon": {"16":"icons/icon16.png","32":"icons/icon32.png","48":"icons/icon48.png","128":"icons/icon128.png"}
   },
   "icons": {"16":"icons/icon16.png","32":"icons/icon32.png","48":"icons/icon48.png","128":"icons/icon128.png"},
-  "host_permissions": ["https://chatgpt.com/*", "https://chat.openai.com/*", "https://claude.ai/*", "https://chat.qwen.ai/*", "https://chat.deepseek.com/*", "https://kimi.com/*", "https://www.kimi.com/*", "https://kimi.moonshot.cn/*", "https://gemini.google.com/*", "https://www.doubao.com/*", "https://doubao.com/*", "https://grok.com/*", "https://*.oaiusercontent.com/*", "https://*.blob.core.windows.net/*"],
+  "host_permissions": ["https://chatgpt.com/*", "https://chat.openai.com/*", "https://claude.ai/*", "https://chat.qwen.ai/*", "https://chat.deepseek.com/*", "https://kimi.ai/*", "https://www.kimi.ai/*", "https://kimi.com/*", "https://www.kimi.com/*", "https://kimi.moonshot.cn/*", "https://gemini.google.com/*", "https://www.doubao.com/*", "https://doubao.com/*", "https://grok.com/*", "https://*.oaiusercontent.com/*", "https://*.blob.core.windows.net/*"],
   "content_scripts": [{
     "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
     "js": ["src/page-bridge.js"],
@@ -23,7 +23,7 @@
     "js": ["src/platforms.js", "src/conversation.js", "src/history.js", "src/content.js"],
     "run_at": "document_idle"
   }, {
-    "matches": ["https://claude.ai/*", "https://chat.qwen.ai/*", "https://chat.deepseek.com/*", "https://kimi.com/*", "https://www.kimi.com/*", "https://kimi.moonshot.cn/*", "https://gemini.google.com/*", "https://www.doubao.com/*", "https://doubao.com/*", "https://grok.com/*"],
+    "matches": ["https://claude.ai/*", "https://chat.qwen.ai/*", "https://chat.deepseek.com/*", "https://kimi.ai/*", "https://www.kimi.ai/*", "https://kimi.com/*", "https://www.kimi.com/*", "https://kimi.moonshot.cn/*", "https://gemini.google.com/*", "https://www.doubao.com/*", "https://doubao.com/*", "https://grok.com/*"],
     "js": ["src/platforms.js", "src/conversation.js", "src/content.js"],
     "run_at": "document_idle"
   }],

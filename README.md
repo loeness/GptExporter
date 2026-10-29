@@ -2,6 +2,8 @@
 
 将 AI 网页对话整理成可保存的文档。独立实现的 Chrome / Edge Manifest V3 扩展，中文界面；渲染库和字体随源码附带，运行时不加载 CDN。
 
+**1.4.1 修复**：补上 kimi.ai 与 www.kimi.ai 的域名识别和内容脚本匹配，修复在 `https://www.kimi.ai/en` 等页面不显示导出按钮的问题。
+
 **1.4 新增**：Claude、Qwen、DeepSeek、Kimi、Gemini、豆包、Grok 的页面对话适配，以及更大、居中的下拉箭头。这些平台读取已加载页面消息，不需要 API Key，也不会调用模型生成接口。平台范围与 DOM 兼容性说明见 [多平台支持](docs/platforms.md)。
 
 **1.3 新增**：点击 SELECT 打开导出页；鼠标悬停右侧小按钮，选择 All、Questions 或 Answers 即可直接下载 PDF，无需进入导出页。

@@ -18,6 +18,8 @@ const providers=[
   {id:'qwen',label:/Qwen|通义千问/i,origin:'https://chat.qwen.ai',path:'/chat/multiplatform-fixture',quickPreset:'questions'},
   {id:'deepseek',label:/DeepSeek/i,origin:'https://chat.deepseek.com',path:'/a/chat/multiplatform-fixture',quickPreset:'answers'},
   {id:'kimi',label:/Kimi/i,origin:'https://www.kimi.com',path:'/chat/multiplatform-fixture'},
+  {id:'kimi',label:/Kimi/i,origin:'https://www.kimi.ai',path:'/en/chat/multiplatform-fixture',quickPreset:'questions'},
+  {id:'kimi',label:/Kimi/i,origin:'https://kimi.ai',path:'/en/chat/multiplatform-fixture'},
   {id:'gemini',label:/Gemini/i,origin:'https://gemini.google.com',path:'/app/multiplatform-fixture'},
   {id:'doubao',label:/Doubao|豆包/i,origin:'https://www.doubao.com',path:'/chat/multiplatform-fixture'},
   {id:'grok',label:/Grok/i,origin:'https://grok.com',path:'/c/multiplatform-fixture'}
@@ -223,10 +225,13 @@ async function quickExport(chat,worker,context,extensionId,platform,preset,expec
       const request=route.request();
       const url=new URL(request.url());
       const provider=providerByOrigin.get(url.origin);
+      if(request.isNavigationRequest()&&url.origin==='https://www.kimi.ai'&&url.pathname==='/en'){
+        return route.fulfill({contentType:'text/html;charset=utf-8',body:'<!doctype html><html><head><meta charset="utf-8"><title>Kimi</title></head><body><main><p>New chat</p><textarea placeholder="Ask anything"></textarea></main></body></html>'});
+      }
       if(request.isNavigationRequest()&&provider){
         return route.fulfill({contentType:'text/html;charset=utf-8',headers:{'cache-control':'no-store'},body:providerMarkup(provider)});
       }
-      if(request.isNavigationRequest()&&url.hostname==='claude.ai.attacker.invalid'){
+      if(request.isNavigationRequest()&&['claude.ai.attacker.invalid','www.kimi.ai.attacker.invalid'].includes(url.hostname)){
         return route.fulfill({contentType:'text/html;charset=utf-8',body:spoofMarkup()});
       }
       blockedRequests.push({url:url.href,method:request.method(),resourceType:request.resourceType()});
@@ -265,8 +270,8 @@ async function quickExport(chat,worker,context,extensionId,platform,preset,expec
         const isQuestion=provider.quickPreset==='questions';
         quickResults.push(await quickExport(chat,worker,context,extensionId,provider.id,provider.quickPreset,
           isQuestion?2:1,
-          isQuestion?/PLATFORM_QWEN_QUESTION_ONE[\s\S]*PLATFORM_QWEN_QUESTION_TWO/:/PLATFORM_DEEPSEEK_ANSWER_WITH_CODE[\s\S]*const result = 42;/,
-          isQuestion?/PLATFORM_QWEN_ANSWER_WITH_CODE|const result = 42;/:/PLATFORM_DEEPSEEK_QUESTION_ONE|PLATFORM_DEEPSEEK_QUESTION_TWO/,
+          isQuestion?new RegExp(questionOne(provider.id)+'[\\s\\S]*'+questionTwo(provider.id)):new RegExp(answerLead(provider.id)+'[\\s\\S]*const result = 42;'),
+          isQuestion?new RegExp(answerLead(provider.id)+'|const result = 42;'):new RegExp(questionOne(provider.id)+'|'+questionTwo(provider.id)),
           null));
       }else if(provider.id==='claude'){
         quickResults.push(await quickExport(chat,worker,context,extensionId,provider.id,'all',3,
@@ -277,8 +282,18 @@ async function quickExport(chat,worker,context,extensionId,platform,preset,expec
       await chat.close();
     }
 
+    const kimiHome=await context.newPage();
+    await kimiHome.goto('https://www.kimi.ai/en');
+    await kimiHome.locator('#gpt-exporter-select').waitFor({state:'visible'});
+    assert.equal(await kimiHome.locator('#gpt-exporter-select').innerText(),'SELECT','the reported Kimi landing URL receives a visible launcher even without messages');
+    await kimiHome.locator('#gpt-exporter-select').click();
+    await kimiHome.waitForFunction(()=>document.querySelector('#gpt-exporter-launcher')?.shadowRoot?.querySelector('.status')?.textContent.includes('未识别到 Kimi 对话消息'));
+    await kimiHome.screenshot({path:path.join(output,'kimi-ai-en-launcher.png')});
+    await kimiHome.close();
+
+    for(const hostname of ['claude.ai.attacker.invalid','www.kimi.ai.attacker.invalid']){
     const spoof=await context.newPage();
-    await spoof.goto('https://claude.ai.attacker.invalid/chat/fixture');
+    await spoof.goto('https://'+hostname+'/chat/fixture');
     await spoof.waitForLoadState('domcontentloaded');
     await sleep(300);
     assert.equal(await spoof.locator('#gpt-exporter-launcher').count(),0,'unsupported lookalike host does not receive the extension');
@@ -286,6 +301,7 @@ async function quickExport(chat,worker,context,extensionId,platform,preset,expec
     assert.equal(spoofBridge.marker,false,'unsupported lookalike host does not receive the ChatGPT page bridge');
     assert.doesNotMatch(spoofBridge.fetchSource,/routeFor|observedUrl|GPT_EXPORTER_PAGE_SNAPSHOT/);
     await spoof.close();
+    }
 
     assert.deepEqual(errors,[],'synthetic pages and extension pages have no uncaught page errors');
     assert.deepEqual(blockedRequests,[],'no API, media, or other remote network request leaves the synthetic provider pages');
@@ -294,7 +310,7 @@ async function quickExport(chat,worker,context,extensionId,platform,preset,expec
       chromium:context.browser()?.version()||'isolated Chromium',
       caseCounts:{providerOrigins:providers.length,readerDomCaptures:readerSummaries.length,branchDefaults:readerSummaries.length,
         quickPdfPresets:quickResults.length,quickPdfOrigins:new Set(quickResults.map(result=>result.platform)).size,
-        unsupportedSpoofHosts:1,chatGptBridgeIsolation:providers.length},
+        unsupportedSpoofHosts:2,chatGptBridgeIsolation:providers.length,kimiLandingLauncher:1},
       providers:readerSummaries,
       quickPdfs:quickResults.map(({platform,preset,downloadId,filename})=>({platform,preset,downloadId,filename})),
       screenshots:Object.fromEntries(Object.entries(screenshotPaths).map(([name,file])=>[name,path.relative(output,file)])),

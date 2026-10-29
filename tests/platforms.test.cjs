@@ -119,6 +119,11 @@ test("registers the eight supported platforms and accepts only exact secure host
   assert.equal(platforms.getPlatform("https://claude.ai:443/chat/example").id, "claude");
   assert.equal(platforms.getPlatform("https://kimi.com/chat/example").id, "kimi");
   assert.equal(platforms.getPlatform("https://kimi.moonshot.cn/chat/example").id, "kimi");
+  assert.equal(platforms.getPlatform("https://www.kimi.ai/en").id, "kimi");
+  assert.equal(platforms.getPlatform("https://www.kimi.ai/en/chat/example").id, "kimi");
+  assert.equal(platforms.getPlatform("https://kimi.ai/en").id, "kimi");
+  assert.equal(platforms.getPlatform("https://www.kimi.ai.attacker.invalid/en"), null);
+  assert.equal(platforms.getPlatform("https://www.kimi.ai@attacker.invalid/en"), null);
   assert.equal(platforms.getPlatform("https://www.doubao.com.evil.example/chat"), null);
   assert.equal(platforms.getPlatform("https://sub.claude.ai/chat"), null);
   assert.equal(platforms.getPlatform("https://grok.com.evil.example/chat"), null);

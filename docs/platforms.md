@@ -8,7 +8,7 @@
 | Claude | [claude.ai](https://claude.ai/) | 当前页面挂载的提问和回答 |
 | Qwen | [chat.qwen.ai](https://chat.qwen.ai/) | 当前页面已加载消息 |
 | DeepSeek | [chat.deepseek.com](https://chat.deepseek.com/) | 当前页面已加载消息 |
-| Kimi | [www.kimi.com](https://www.kimi.com/)；兼容 kimi.com、kimi.moonshot.cn | 当前页面已加载消息 |
+| Kimi | [www.kimi.ai/en](https://www.kimi.ai/en)、[www.kimi.com](https://www.kimi.com/)；兼容 kimi.ai、kimi.com、kimi.moonshot.cn | 当前页面已加载消息 |
 | Gemini | [gemini.google.com](https://gemini.google.com/) | 当前页面已加载提问与模型回答 |
 | 豆包 | [www.doubao.com](https://www.doubao.com/)；兼容 doubao.com | 当前页面已加载消息 |
 | Grok | [grok.com](https://grok.com/) | 当前页面已加载消息；不在 x.com 全站注入 |
