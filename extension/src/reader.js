@@ -227,8 +227,9 @@
     state.branchId = branches.some(branch => branch.id === state.conversation.activeBranchId) ? state.conversation.activeBranchId : '__all';
     list.value=state.branchId;
     const source=state.conversation.source;
-    const names={api:'完整对话 API',shared:'共享对话',temporary:'临时对话',dom:'页面 DOM'};
-    els['source-quality'].textContent=`${names[source?.kind] || '页面 DOM'} · ${source?.complete ? '已读取返回的完整消息树' : '部分数据，请留意提示'} · ${branches.length || 1} 个分支`;
+    const platform=root.GptExporter.getPlatform?.(state.conversation.url);
+    const names={api:'完整对话 API',shared:'共享对话',temporary:'临时对话',dom:'已加载页面'};
+    els['source-quality'].textContent=`${platform?.label || 'AI 对话'} · ${names[source?.kind] || '页面 DOM'} · ${source?.complete ? '已读取返回的完整消息树' : '部分数据，请留意提示'} · ${branches.length || 1} 个分支`;
     els['load-media'].disabled=!(state.conversation.assets?.length);
     els['source-caption'].textContent=source?.complete ? '消息树在本地解析，数据不经过自建服务器' : '未确认完整历史；仅导出本次实际取得的内容';
   }

@@ -16,9 +16,16 @@
   → 临时 session 模型 → offscreen direct-export.html 本地渲染
   → Blob URL → downloads.download → 仅等待本次下载 ID
   → 释放 Blob、关闭 offscreen 文档、移除临时 session 记录
+
+Claude / Qwen / DeepSeek / Kimi / Gemini / 豆包 / Grok
+  → platforms.js 精确域名注册表 + 平台专属消息识别
+  → 仅复制识别到的消息正文 → conversation.js 安全语义提取
+  → DOM / complete:false / source.platform → 相同预览和快捷导出流程
 ```
 
-隔离世界的内容脚本只在两个 ChatGPT 域名执行；MAIN 世界桥只观察当前会话的指定 API 响应/临时 SSE 副本及共享 loader，不读取 Authorization 请求头。访问令牌仅在同源请求函数闭包中暂存。浮动入口使用 Shadow DOM；已有页面可幂等注入重连。
+隔离世界的内容脚本只在平台注册表的明确域名执行；MAIN 世界桥与 history.js 仅用于 ChatGPT，不注入其他平台。桥只观察当前会话的指定 API 响应/临时 SSE 副本及共享 loader，不读取 Authorization 请求头。访问令牌仅在同源请求函数闭包中暂存。浮动入口使用 Shadow DOM；已有页面可幂等注入重连。
+
+后台、弹窗和 offscreen 共用 platforms.js 域名注册表；后台从来源 URL 推导平台，强制非 ChatGPT 来源为 DOM/不完整，并清除其资产读取请求。导出 JSON 仅增加经过白名单校验的 platform 标识。资源检查同时比对注册表、主机权限、内容脚本匹配域名，防止扩大页面桥或引入不相关域名。
 
 服务工作线程验证消息来源和数据类型，按顺序创建预览，避免并发写入破坏缓存预算。创建标签页失败会回滚新增缓存。数据只存在 `storage.session`；服务工作线程休眠不影响已创建预览，浏览器重启会清空对话缓存。24 小时过期清理在下次打开预览时执行，没有定时后台任务。
 

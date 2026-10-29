@@ -373,6 +373,7 @@
     const output = {};
     if (['api', 'shared', 'temporary', 'dom'].includes(source.kind)) output.kind = source.kind;
     if (typeof source.complete === 'boolean') output.complete = source.complete;
+    if (['chatgpt','claude','qwen','deepseek','kimi','gemini','doubao','grok'].includes(source.platform)) output.platform = source.platform;
     for (const key of ['conversationId', 'sourceTabId']) {
       const value = source[key];
       if ((typeof value === 'string' && value.length <= 256) || (key === 'sourceTabId' && Number.isSafeInteger(value))) output[key] = value;

@@ -5,6 +5,7 @@ const vm = require('node:vm');
 const fs = require('node:fs');
 const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '../extension/src/background.js'), 'utf8');
+const platformsSource = fs.readFileSync(path.join(__dirname, '../extension/src/platforms.js'), 'utf8');
 function setup(options = {}) {
   const records = {...options.records}; const tabs = [], downloads = [], renders = [];
   const documents = {created:0,closed:0}; const downloadListeners = new Set(); let listener;
@@ -27,7 +28,7 @@ function setup(options = {}) {
       async search(){return [{state:options.interrupted?'interrupted':'complete',...(options.interrupted?{error:'USER_CANCELED'}:{})}];},
       async cancel(){},onChanged:{addListener(value){downloadListeners.add(value);},removeListener(value){downloadListeners.delete(value);}}}
   };
-  vm.runInNewContext(source, {chrome, TextEncoder, URL, crypto: require('node:crypto').webcrypto, Date,atob:options.atob||atob,btoa,AbortSignal,setTimeout,clearTimeout,setInterval,clearInterval,
+  vm.runInNewContext(platformsSource + '\n' + source, {chrome, TextEncoder, URL, importScripts(value){assert.equal(value,'platforms.js');},crypto: require('node:crypto').webcrypto, Date,atob:options.atob||atob,btoa,AbortSignal,setTimeout,clearTimeout,setInterval,clearInterval,
     fetch:options.fetch||async function(){throw new Error('network disabled in test');}});
   function send(message, sender = {id: 'test-id', url: 'https://chatgpt.com/c/test'}) {
     return new Promise(resolve => { const pending = listener(message, sender, resolve); if (pending === false) resolve(undefined); });
@@ -74,6 +75,21 @@ test('retains graph metadata but strips credentials and binary data from session
   const result=await env.send({type:'GPT_EXPORTER_OPEN',conversation:input});
   const saved=env.records['export:'+result.id];assert.equal(saved.source.complete,true);
   assert.deepEqual(Array.from(saved.branches[0].messageIds),['1']);assert.ok(!JSON.stringify(saved).includes('never-store'));
+});
+test('new platforms derive identity from the source URL and cannot claim full API history or cross-platform assets',async()=>{
+  for (const [id,host] of [['claude','claude.ai'],['qwen','chat.qwen.ai'],['deepseek','chat.deepseek.com'],['kimi','www.kimi.com'],['gemini','gemini.google.com'],['doubao','www.doubao.com'],['grok','grok.com']]) {
+    const env=setup();const input=model();input.url='https://'+host+'/conversation/example';
+    input.source={kind:'api',complete:true,platform:'chatgpt',conversationId:'private-conversation'};
+    input.messages[0].assetIds=['f'];input.assets=[{id:'f',messageId:'1',kind:'attachment',url:'https://chatgpt.com/api/auth/session'}];
+    const result=await env.send({type:'GPT_EXPORTER_OPEN',conversation:input},{id:'test-id',url:input.url,tab:{id:7}});
+    assert.equal(result.ok,true);
+    const saved=env.records['export:'+result.id];assert.equal(saved.source.platform,id);
+    assert.equal(saved.source.kind,'dom');assert.equal(saved.source.complete,false);assert.equal(saved.source.conversationId,'');
+    assert.equal(saved.assets.length,0);assert.equal(saved.messages[0].assetIds.length,0);
+    assert.match(saved.warnings[0],/当前页面已加载/);
+  }
+  const env=setup();
+  assert.equal((await env.send({type:'GPT_EXPORTER_OPEN',conversation:model()},{id:'test-id',url:'https://claude.ai/chat/other',tab:{id:7}})).ok,false);
 });
 function branchedModel(){
   const input=model();input.schemaVersion=2;

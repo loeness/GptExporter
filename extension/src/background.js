@@ -1,4 +1,5 @@
 'use strict';
+importScripts('platforms.js');
 
 // Session-only conversation data; never store chat bodies in persistent local storage.
 const SESSION_PREFIX = 'export:';
@@ -11,10 +12,7 @@ let activeDirectTabId;
 let directPhase = '准备文档';
 
 function supportedPage(value) {
-  try {
-    const url = new URL(value);
-    return url.protocol === 'https:' && ['chatgpt.com', 'chat.openai.com'].includes(url.hostname);
-  } catch { return false; }
+  return Boolean(globalThis.GptExporter.getPlatform(value));
 }
 
 function trustedSender(sender) {
@@ -26,23 +24,25 @@ function trustedSender(sender) {
 function validateConversation(input) {
   if (!input || ![1, 2].includes(input.schemaVersion) || !supportedPage(input.url) ||
       !Array.isArray(input.messages) || input.messages.length === 0 || input.messages.length > 20000) {
-    throw new Error('未找到可导出的对话。请打开 ChatGPT 对话并等待内容加载。');
+    throw new Error('未找到可导出的对话。请打开支持平台的具体对话并等待内容加载。');
   }
+  const platform = globalThis.GptExporter.getPlatform(input.url);
+  const chatgpt = platform.id === 'chatgpt';
   const roles = new Set(['user', 'assistant', 'system', 'tool']);
   const model = {
     schemaVersion: 2,
-    title: String(input.title || 'ChatGPT 对话').slice(0, 300),
+    title: String(input.title || platform.label + ' 对话').slice(0, 300),
     url: input.url,
     exportedAt: new Date().toISOString(),
     messages: input.messages.map((message, index) => {
       if (!message || !roles.has(message.role) ||
           ['markdown', 'text', 'html'].some(field => typeof message[field] !== 'string')) {
-        throw new Error('对话数据格式异常，请刷新 ChatGPT 后重试。');
+        throw new Error('对话数据格式异常，请刷新原对话后重试。');
       }
       return {id: String(message.id || index).slice(0, 250), role: message.role,
         markdown: message.markdown, text: message.text, html: message.html,
         createTime: Number.isFinite(message.createTime) ? message.createTime : undefined,
-        assetIds: Array.isArray(message.assetIds) ? message.assetIds.map(String).slice(0, 200) : []};
+        assetIds: chatgpt && Array.isArray(message.assetIds) ? message.assetIds.map(String).slice(0, 200) : []};
     }),
     warnings: Array.isArray(input.warnings) ? input.warnings.filter(x => typeof x === 'string').slice(0, 10) : [],
     createdAt: Date.now()
@@ -60,11 +60,13 @@ function validateConversation(input) {
   if (input.activeBranchId && !hasActiveBranch) throw new Error('无法确认当前对话分支，请刷新对话后重试。');
   model.activeBranchId = hasActiveBranch ? input.activeBranchId : model.branches[0].id;
   model.source = {
-    kind: ['api','shared','temporary','dom'].includes(input.source?.kind) ? input.source.kind : 'dom',
-    complete: input.source?.complete === true,
-    conversationId: String(input.source?.conversationId || '').slice(0, 250)
+    platform: platform.id,
+    kind: chatgpt && ['api','shared','temporary','dom'].includes(input.source?.kind) ? input.source.kind : 'dom',
+    complete: chatgpt && input.source?.complete === true,
+    conversationId: chatgpt ? String(input.source?.conversationId || '').slice(0, 250) : ''
   };
-  model.assets = (Array.isArray(input.assets) ? input.assets : []).slice(0, 300).filter(asset => asset && ['image','attachment'].includes(asset.kind)).map(asset => ({
+  if (!chatgpt) model.warnings = [`${platform.label}：仅包含当前页面已加载的消息，未读取完整历史和其他分支。`,...model.warnings].slice(0,10);
+  model.assets = (chatgpt && Array.isArray(input.assets) ? input.assets : []).slice(0, 300).filter(asset => asset && ['image','attachment'].includes(asset.kind)).map(asset => ({
     id: String(asset.id || '').slice(0, 250), messageId: String(asset.messageId || '').slice(0, 250), kind:asset.kind,
     name:String(asset.name || '附件').slice(0, 250),mimeType:String(asset.mimeType || 'application/octet-stream').slice(0, 100),
     size:Number.isFinite(asset.size) ? asset.size : undefined,fileId:String(asset.fileId || '').slice(0, 250),
@@ -79,6 +81,7 @@ function validateConversation(input) {
 function modelFromSender(input, sender) {
   const model = validateConversation(input);
   const fromPopup = sender?.url === chrome.runtime.getURL('popup.html');
+  if (!fromPopup && new URL(sender.url).origin !== new URL(model.url).origin) throw new Error('对话来源与当前平台不一致，请刷新原页面后重试。');
   model.source.sourceTabId = !fromPopup && Number.isInteger(sender?.tab?.id) ? sender.tab.id :
     (Number.isInteger(input.source?.sourceTabId) ? input.source.sourceTabId : undefined);
   return model;

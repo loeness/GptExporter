@@ -2,6 +2,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const {execFileSync} = require('node:child_process');
+const vm = require('node:vm');
 const root = path.resolve(__dirname, '..', 'extension');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json')));
 if (manifest.manifest_version !== 3) throw new Error('Manifest V3 required');
@@ -28,7 +29,14 @@ for (const file of walk(root)) {
     }
   }
 }
-const allowedHosts=['https://chatgpt.com/*','https://chat.openai.com/*','https://*.oaiusercontent.com/*','https://*.blob.core.windows.net/*'];
-if (JSON.stringify(manifest.host_permissions)!==JSON.stringify(allowedHosts)||manifest.externally_connectable) throw new Error('Unexpected host permissions');
+const registry = {URL};
+vm.runInNewContext(fs.readFileSync(path.join(root,'src/platforms.js'),'utf8'),registry);
+const websites = registry.GptExporter.supportedPlatforms.flatMap(platform => Array.from(platform.hosts,host => 'https://' + host + '/*'));
+const allowedHosts=[...websites,'https://*.oaiusercontent.com/*','https://*.blob.core.windows.net/*'];
+if (JSON.stringify([...manifest.host_permissions].sort())!==JSON.stringify(allowedHosts.sort())||manifest.externally_connectable) throw new Error('Unexpected host permissions');
+const regular = manifest.content_scripts.filter(script => script.world !== 'MAIN');
+if (JSON.stringify(regular.flatMap(script => script.matches).sort())!==JSON.stringify(websites.sort())) throw new Error('Content hosts do not match the provider registry');
+const bridges = manifest.content_scripts.filter(script => script.world === 'MAIN');
+if (bridges.length !== 1 || JSON.stringify([...bridges[0].matches].sort())!==JSON.stringify(['https://chat.openai.com/*','https://chatgpt.com/*'])) throw new Error('Page bridge must remain limited to ChatGPT');
 if (JSON.stringify([...manifest.permissions].sort()) !== JSON.stringify(['activeTab', 'downloads', 'offscreen', 'scripting', 'storage'])) throw new Error('Unexpected permissions');
 console.log('Manifest resources, JavaScript syntax, local HTML references and CSP: OK');

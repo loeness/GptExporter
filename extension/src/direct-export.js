@@ -14,13 +14,7 @@
   }
 
   function validSourceUrl(value) {
-    try {
-      const url = new URL(String(value || ''));
-      return url.protocol === 'https:' && !url.username && !url.password &&
-        ['chatgpt.com', 'chat.openai.com'].includes(url.hostname);
-    } catch (_) {
-      return false;
-    }
+    return Boolean(root.GptExporter?.getPlatform(value));
   }
 
   function validateModel(model) {

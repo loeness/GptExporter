@@ -1,6 +1,6 @@
 {
   "name": "gpt-exporter",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "private": true,
   "description": "An independent local-first ChatGPT conversation exporter for Chromium",
   "scripts": {
@@ -9,6 +9,7 @@
     "test:browser": "node tests/browser.cjs",
     "test:advanced": "node tests/advanced-browser.cjs",
     "test:selection": "node tests/selection-browser.cjs",
+    "test:platforms": "node tests/platforms-browser.cjs",
     "build:vendor": "node scripts/build-vendor.cjs"
   },
   "engines": {

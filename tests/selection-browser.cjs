@@ -66,6 +66,32 @@ function isPdfFile(file){
 
     const menuToggle=chat.locator('#gpt-exporter-menu-toggle');
     const menu=chat.locator('#gpt-exporter-selection-menu');
+    const arrowGeometry=await chat.evaluate(()=>{
+      const shadow=document.querySelector('#gpt-exporter-launcher')?.shadowRoot;
+      const button=shadow?.querySelector('#gpt-exporter-menu-toggle');
+      const icon=button?.querySelector('svg');
+      if(!button||!icon)return null;
+      const buttonRect=button.getBoundingClientRect(),iconRect=icon.getBoundingClientRect();
+      return {
+        buttonWidth:buttonRect.width,
+        buttonCenterX:buttonRect.left+buttonRect.width/2,
+        buttonCenterY:buttonRect.top+buttonRect.height/2,
+        iconWidth:iconRect.width,
+        iconHeight:iconRect.height,
+        iconCenterX:iconRect.left+iconRect.width/2,
+        iconCenterY:iconRect.top+iconRect.height/2,
+        viewBox:icon.getAttribute('viewBox'),
+        path:icon.querySelector('path')?.getAttribute('d')
+      };
+    });
+    assert.ok(arrowGeometry,'the dropdown control contains an SVG chevron');
+    assert.ok(arrowGeometry.buttonWidth>=44,'the dropdown button is at least 44 px wide');
+    assert.ok(arrowGeometry.iconWidth>=22&&arrowGeometry.iconHeight>=22,'the dropdown icon is at least 22 px in both dimensions');
+    assert.ok(Math.abs(arrowGeometry.iconCenterX-arrowGeometry.buttonCenterX)<=1,'the dropdown icon is horizontally centered');
+    assert.ok(Math.abs(arrowGeometry.iconCenterY-arrowGeometry.buttonCenterY)<=1,'the dropdown icon is vertically centered');
+    assert.equal(arrowGeometry.viewBox,'0 0 24 24','the dropdown icon uses a 24 by 24 viewBox');
+    assert.equal(arrowGeometry.path,'M6 9l6 6 6-6','the chevron path is centered in its viewBox');
+    checks.push('dropdown chevron is at least 22 px and centered in a 44 px button');
     const menuOpen=()=>chat.evaluate(()=>{
       const current=document.querySelector('#gpt-exporter-launcher')?.shadowRoot?.querySelector('#gpt-exporter-selection-menu');
       return Boolean(current&&!current.hidden&&getComputedStyle(current).display!=='none'&&getComputedStyle(current).visibility!=='hidden');

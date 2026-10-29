@@ -7,9 +7,11 @@
 
   async function collect() {
     const url = location.href;
-    const conversation = await api.collectConversation({document, url});
+    const platform = api.getPlatform(url);
+    if (!platform) throw new Error('当前网站暂不支持对话导出。');
+    const conversation = platform.id === 'chatgpt' ? await api.collectConversation({document, url}) : api.collectPlatformConversation({document, url});
     if (url !== location.href) throw new Error('对话已切换，请在当前对话重新导出。');
-    if (!conversation.messages.length) throw new Error('未找到对话，请打开一段 ChatGPT 对话并等待加载。');
+    if (!conversation?.messages.length) throw new Error(`未识别到 ${platform.label} 对话消息，请打开具体对话并等待加载；页面结构变化时可能需要更新适配。`);
     return conversation;
   }
 
@@ -20,6 +22,7 @@
       respond({ok:true}); return false;
     }
     if (message?.type === 'GPT_EXPORTER_RESOLVE_ASSET') {
+      if (api.getPlatform(location.href)?.id !== 'chatgpt') { respond({ok:false,error:'此平台暂不支持读取原始附件。'}); return false; }
       api.resolveAsset(message.asset,{source:message.source,url:message.url})
         .then(asset=>respond({ok:true,asset})).catch(error=>respond({ok:false,error:error.message}));
       return true;
@@ -39,7 +42,8 @@
     button:focus-visible{outline:3px solid #80d5bc;outline-offset:3px}
     .select,.toggle{height:42px;border:1px solid #5c8e82;background:#164b41;color:#fff;box-shadow:0 3px 12px #0002}
     .select{border-radius:10px 0 0 10px;padding:0 18px;letter-spacing:.5px;font-weight:600}
-    .toggle{border-left:1px solid #ffffff40;border-radius:0 10px 10px 0;width:36px;font-size:18px}
+    .toggle{display:flex;align-items:center;justify-content:center;padding:0;line-height:1;border-left:1px solid #ffffff40;border-radius:0 10px 10px 0;width:44px}
+    .toggle svg{display:block;width:24px;height:24px;pointer-events:none}
     .select:hover,.toggle:hover,.toggle[aria-expanded=true]{background:#216455}
     .menu{position:absolute;right:0;bottom:100%;padding-bottom:8px;min-width:164px}
     .options{background:#fff;border:1px solid #dedee4;border-radius:8px;padding:6px;box-shadow:0 5px 14px #0002}
@@ -52,7 +56,9 @@
   const select = document.createElement('button'); select.id = 'gpt-exporter-select'; select.className = 'select'; select.type = 'button';
   select.textContent = 'SELECT'; select.title = '打开导出页面，选择消息与文件格式'; select.setAttribute('aria-label','打开对话导出页面');
   const toggle = document.createElement('button'); toggle.id = 'gpt-exporter-menu-toggle'; toggle.className = 'toggle'; toggle.type = 'button';
-  toggle.textContent = '⌄'; toggle.title = '快捷导出 PDF'; toggle.setAttribute('aria-label','快捷导出范围');
+  const arrow = document.createElementNS('http://www.w3.org/2000/svg','svg'); arrow.setAttribute('viewBox','0 0 24 24'); arrow.setAttribute('aria-hidden','true');
+  const arrowPath = document.createElementNS('http://www.w3.org/2000/svg','path'); arrowPath.setAttribute('d','M6 9l6 6 6-6'); arrowPath.setAttribute('fill','none'); arrowPath.setAttribute('stroke','currentColor'); arrowPath.setAttribute('stroke-width','2.4'); arrowPath.setAttribute('stroke-linecap','round'); arrowPath.setAttribute('stroke-linejoin','round');
+  arrow.append(arrowPath); toggle.append(arrow); toggle.title = '快捷导出 PDF'; toggle.setAttribute('aria-label','快捷导出范围');
   toggle.setAttribute('aria-haspopup','menu'); toggle.setAttribute('aria-controls','gpt-exporter-selection-menu'); toggle.setAttribute('aria-expanded','false');
   const menu = document.createElement('div'); menu.id = 'gpt-exporter-selection-menu'; menu.className = 'menu'; menu.hidden = true;
   menu.setAttribute('role','menu'); menu.setAttribute('aria-label','直接导出 PDF');
@@ -119,7 +125,7 @@
     if (busy) return;
     const returnFocus = shadow.activeElement === select || shadow.activeElement === toggle || buttons.includes(shadow.activeElement);
     setBusy(true); closeMenu();
-    status.textContent = preset ? '正在读取完整对话并生成 PDF…' : '正在读取完整对话…';
+    status.textContent = preset ? '正在读取对话并生成 PDF…' : '正在读取对话…';
     try {
       const conversation = await collect();
       const response = await chrome.runtime.sendMessage(preset ? {type:'GPT_EXPORTER_QUICK',conversation,preset,format:'pdf'} : {type:'GPT_EXPORTER_OPEN',conversation});

@@ -51,7 +51,7 @@ const fixture = `<!doctype html><html><head><meta charset="utf-8"><title>浏览�
     const popup = await context.newPage();
     await popup.goto(base + 'popup.html');
     await popup.locator('#open').click();
-    assert.match(await popup.locator('#status').innerText(), /ChatGPT 对话页面/);
+    assert.match(await popup.locator('#status').innerText(), /支持的 AI 对话页面/);
     await reader.bringToFront();
     await reader.waitForURL('**/reader.html?id=*');
     await reader.waitForFunction(() => document.querySelector('#message-total').textContent === '3 条');
