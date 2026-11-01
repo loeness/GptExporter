@@ -1,4 +1,4 @@
-# GptExporter
+# AI 对话导出器 · AI Conversation Exporter
 
 将 AI 网页对话整理成可保存的文档。独立实现的 Chrome / Edge Manifest V3 扩展，中文界面；渲染库和字体随源码附带，运行时不加载 CDN。
 
@@ -51,7 +51,7 @@ CSV 按 RFC 4180 引号与换行规则生成；可能被电子表格识别为公
 
 “完整”仅指本次会话接口实际返回且结构完整的消息树，不代表能访问已删除、服务拒绝或从未取得的数据。共享/临时会话取决于页面 loader、流式响应和当前接口可用性；扩展加载前已经结束且无可读记录的临时对话，无法凭空恢复。接口变化、403、失效附件、超大媒体和不支持的渲染会明确提示。
 
-本项目基于对已安装 ChatGPT Exporter `6.13.2` 的 REA 静态调查独立重写。原扩展的账户、订阅和用量服务不在本版范围；不主张完整功能等价。没有复制其压缩源码、图标、品牌、密钥或网站服务。证据见 [分析报告](docs/reverse-engineering.md)，数据流见 [架构说明](docs/architecture.md)，依赖来源与许可证见 `extension/vendor/provenance.json` 和 `extension/vendor/licenses/`。
+数据流见 [架构说明](docs/architecture.md)，依赖来源与许可证见 `extension/vendor/provenance.json` 和 `extension/vendor/licenses/`。
 
 ## 开发与验证
 
