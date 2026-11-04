@@ -17,7 +17,7 @@
 1. 用 Git 获取本仓库：`git clone https://github.com/loeness/GptExporter.git`。
 2. 打开 Chrome 的 `chrome://extensions`（Edge 使用 `edge://extensions`），开启“开发者模式”。
 3. 选择“加载已解压的扩展程序”，选中仓库里的 **`extension` 文件夹**。
-4. 刷新已打开的受支持 AI 对话页面。在对话页点击 SELECT，或点击浏览器工具栏的扩展图标。
+4. 刷新已打开的受支持 AI 对话页面。在对话页点击 SELECT 打开导出预览；浏览器工具栏的扩展图标用于调整设置。
 
 安装不需要 Node.js、构建、注册账号或 API Key。要求 Chromium 114 或更新版本。仓库只交付源码，不提供 ZIP、CRX、Release 附件或打包下载入口。
 
@@ -48,7 +48,7 @@ CSV 按 RFC 4180 引号与换行规则生成；可能被电子表格识别为公
 - 媒体原始字节仅在 reader 或临时渲染文档的内存中保存，单文件上限 12 MB，当前所选媒体总预算 40 MB。只允许当前对话解析出的 ChatGPT/oaiusercontent 媒体及带签名的 Azure Blob 地址；其他外站图片保留为链接，不会抓取。保持源对话标签页打开以刷新过期的文件地址。
 - `chrome.storage.local` 仅保存界面偏好。无数据上传、遥测、账号或支付系统。
 - 新增平台当前优先支持文字、代码及可提取的公式/图表源码；原始图片、文件附件和历史分支接口尚未接入，不会自动请求这些平台的媒体服务。图片保留可取得的链接或替代文字。
-- `storage` 用于暂存与偏好；`activeTab`、`scripting` 用于扩展刚加载时连接当前已打开的受支持标签页；`offscreen` 用于无标签页的本地文档渲染；`downloads` 用于快捷保存文件并确认本次下载完成；`clipboardWrite` 用于用户开启复制后写入非 PDF 导出内容。声明式内容脚本只匹配平台注册表内的明确域名。
+- `storage` 用于暂存与偏好；`offscreen` 用于无标签页的本地文档渲染；`downloads` 用于快捷保存文件并确认本次下载完成；`clipboardWrite` 用于用户开启复制后写入非 PDF 导出内容。声明式内容脚本只匹配平台注册表内的明确域名；当前仍保留 `activeTab` 和 `scripting` 权限。
 - 无远端脚本或外部消息接口。新增平台主机权限用于注入页面读取器；ChatGPT 媒体权限与 Azure Blob 的签名校验范围保持原有设置。预览和 HTML 导出清理危险标签、属性与 URL；活动附件类型作为下载用二进制处理，不在页面执行。
 
 ## 范围与限制

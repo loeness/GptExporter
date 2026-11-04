@@ -47,11 +47,23 @@ const fixture = `<!doctype html><html><head><meta charset="utf-8"><title>浏览�
     const readerPromise = context.waitForEvent('page');
     await chat.locator('#gpt-exporter-select').click();
     const reader = await readerPromise;
-    // Popup invalid-page feedback is tested separately from the action-granted permission.
+    // The popup now contains settings only; the page launcher opens the reader.
     const popup = await context.newPage();
     await popup.goto(base + 'popup.html');
-    await popup.locator('#open').click();
-    assert.match(await popup.locator('#status').innerText(), /支持的 AI 对话页面/);
+    assert.equal(await popup.locator('#open').count(), 0, 'popup does not contain a reader launch action');
+    assert.match(await popup.locator('.supported-platforms').innerText(), /支持 ChatGPT/);
+    assert.equal(await popup.locator('.settings').isVisible(), true, 'export settings remain visible in the popup');
+    assert.equal(await popup.locator('#setting-show-toolbar').isVisible(), true, 'toolbar visibility setting remains visible');
+    for (const selector of ['header', 'h1', '.formats', '.hint', 'footer']) {
+      assert.equal(await popup.locator(selector).count(), 0, 'popup does not show the old introduction area: ' + selector);
+    }
+    await popup.screenshot({path: path.join(output, 'popup-settings.png'), fullPage: true});
+    const [chatTab] = await worker.evaluate(url => chrome.tabs.query({url}), chat.url());
+    await worker.evaluate(id => chrome.tabs.update(id, {active: true}), chatTab.id);
+    await popup.locator('#setting-show-toolbar').uncheck();
+    await chat.waitForFunction(() => document.getElementById('gpt-exporter-launcher')?.hidden === true);
+    await popup.locator('#setting-show-toolbar').check();
+    await chat.waitForFunction(() => document.getElementById('gpt-exporter-launcher')?.hidden === false);
     await reader.bringToFront();
     await reader.waitForURL('**/reader.html?id=*');
     await reader.waitForFunction(() => document.querySelector('#message-total').textContent === '3 条');
@@ -126,7 +138,7 @@ const fixture = `<!doctype html><html><head><meta charset="utf-8"><title>浏览�
     assert.deepEqual(errors, []);
     assert.deepEqual(unexpectedNetwork, []);
     const report = {status:'passed',chromium:context.browser()?.version() || 'persistent-context',checks:[
-      'MV3 load','main SELECT entry to reader','popup invalid-page feedback','three fixture messages','sanitized preview',
+      'MV3 load','main SELECT entry to reader','settings-only popup','toolbar setting hides and restores launcher','three fixture messages','sanitized preview',
       'role selection','search preserves selection','JSON selection download','standalone UTF-8 HTML',
       'PDF print layout','hidden/empty/error visibility','theme toggle','zero-selection protection','clipboard failure','mobile layout','session clear','missing session'
     ]};

@@ -140,7 +140,7 @@ function isPdfFile(file){
     await chat.waitForFunction(()=>document.getElementById('gpt-exporter-launcher')?.hidden === false);
     checks.push('popup switch hides and restores the page launcher');
     await worker.evaluate(id=>chrome.tabs.update(id,{active:true}),tab.id);
-    const readerPromise=context.waitForEvent('page');await popup.evaluate(()=>document.getElementById('open').click());
+    const readerPromise=context.waitForEvent('page');await chat.locator('#gpt-exporter-select').click();
     const reader=await readerPromise;reader.setDefaultTimeout(30000);await reader.waitForSelector('#message-list input');
     assert.equal(await reader.locator('#message-list input').count(),18);
     await reader.waitForSelector('.katex');await reader.waitForSelector('svg.ge-mermaid-diagram');
@@ -148,7 +148,7 @@ function isPdfFile(file){
     const diagramText=await reader.locator('svg.ge-mermaid-diagram').textContent();
     for(const label of ['输入数据','本地处理','导出文档'])assert.ok(diagramText.includes(label),'Mermaid label missing: '+label);
     assert.equal(await reader.locator('svg.ge-mermaid-diagram foreignObject').count(),0);
-    checks.push('real popup to full reader','KaTeX rendering','Mermaid rendering');
+    checks.push('page SELECT to full reader','KaTeX rendering','Mermaid rendering');
     await reader.waitForSelector('#preview-content img[src^="data:image/"]');
     assert.doesNotMatch(await reader.locator('#preview-content').innerText(), /TOOL_SECRET_FIXTURE|THINKING_SECRET_FIXTURE|turn0search0/);
     assert.equal(await reader.locator('#preview-content article[data-role="user"]').count(),9);
@@ -289,7 +289,7 @@ function isPdfFile(file){
     }}));
     const settingsPopup=await context.newPage();await settingsPopup.goto(base+'popup.html');
     await worker.evaluate(id=>chrome.tabs.update(id,{active:true}),tab.id);
-    const secondReaderPromise=context.waitForEvent('page');await settingsPopup.evaluate(()=>document.getElementById('open').click());
+    const secondReaderPromise=context.waitForEvent('page');await chat.locator('#gpt-exporter-select').click();
     const secondReader=await secondReaderPromise;secondReader.setDefaultTimeout(30000);await secondReader.waitForSelector('#message-list input');
     let requestedFilename='', clipboardCopied=false;
     secondReader.on('console',message=>{if(message.text().startsWith('fixture filename:'))requestedFilename=message.text().slice('fixture filename:'.length);if(message.text()==='fixture clipboard:ok')clipboardCopied=true;});
