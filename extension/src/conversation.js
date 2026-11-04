@@ -23,6 +23,16 @@
   const HISTORY_WARNING = "仅包含当前已加载并挂载在对话 DOM 中的消息；不会获取更早或尚未加载的历史记录。";
   const PRESERVED_TEXT_START = "\uE000";
   const PRESERVED_TEXT_END = "\uE001";
+  const CHATGPT_CITATION_TOKEN = /\uE200cite\b[\s\S]*?\uE201/gi;
+  const EXCLUDED_CONTENT = [
+    "[data-citation]", "[data-citation-id]", "[data-annotation-type='citation' i]",
+    "[data-testid*='citation' i]", "[data-testid*='sources' i]",
+    "[data-testid*='analysis' i]", "[data-testid*='reasoning' i]",
+    "[data-testid*='thinking' i]", "[data-testid*='thought' i]",
+    "[data-testid*='tool-call' i]", "[data-testid*='tool_call' i]",
+    "[data-message-channel='analysis' i]", "[data-channel='analysis' i]",
+    "[data-message-type='analysis' i]"
+  ].join(",");
 
   function escapeHtml(value) {
     return String(value)
@@ -105,6 +115,11 @@
     if (!element || element.nodeType !== 1) return false;
     if (DROP_TAGS.has(element.tagName.toLowerCase())) return true;
     if (element.hasAttribute("hidden") || element.getAttribute("aria-hidden") === "true") return true;
+    try {
+      if (element.matches(EXCLUDED_CONTENT)) return true;
+    } catch (_) {
+      // Ignore unsupported selector behavior in older DOM implementations.
+    }
     const testId = (element.getAttribute("data-testid") || "").toLowerCase();
     return /(?:copy|toolbar|message-actions|turn-actions|feedback|regenerate|retry|share|edit-message)/.test(testId);
   }
@@ -382,8 +397,14 @@
     return lines.join("\n");
   }
 
-  function finishText(value) {
-    const protectedText = maskPreservedText(value);
+  function stripCitationMarkers(value, role) {
+    const text = String(value || "");
+    return String(role || "").toLowerCase() === "user" ? text : text.replace(CHATGPT_CITATION_TOKEN, "");
+  }
+
+  function finishText(value, role) {
+    const source = stripCitationMarkers(value, role);
+    const protectedText = maskPreservedText(source);
     const cleaned = protectedText.masked
       .replace(/[\t ]+\n/g, "\n")
       .replace(/\n{3,}/g, "\n\n")
@@ -391,8 +412,8 @@
     return protectedText.restore(cleaned);
   }
 
-  function finishMarkdown(value) {
-    const protectedText = maskPreservedText(value);
+  function finishMarkdown(value, role) {
+    const protectedText = maskPreservedText(stripCitationMarkers(value, role));
     return protectedText.restore(protectedText.masked.trim());
   }
 
@@ -477,8 +498,8 @@
       messages.push({
         id,
         role: candidate.role,
-        markdown: finishMarkdown(markdownNode(content, sourceDocument)),
-        text: finishText(textNode(content, sourceDocument, false)),
+        markdown: finishMarkdown(markdownNode(content, sourceDocument), candidate.role),
+        text: finishText(textNode(content, sourceDocument, false), candidate.role),
         html: safeHtmlNode(content, sourceDocument, false)
       });
     }

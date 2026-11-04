@@ -41,7 +41,10 @@ function validateConversation(input) {
       }
       return {id: String(message.id || index).slice(0, 250), role: message.role,
         markdown: message.markdown, text: message.text, html: message.html,
-        createTime: Number.isFinite(message.createTime) ? message.createTime : undefined,
+        ...(message.visibility === 'internal' ? {visibility:'internal'} : {}),
+        createTime: typeof message.createTime === 'string' && Number.isFinite(Date.parse(message.createTime))
+          ? new Date(message.createTime).toISOString()
+          : Number.isFinite(message.createTime) ? message.createTime : undefined,
         assetIds: chatgpt && Array.isArray(message.assetIds) ? message.assetIds.map(String).slice(0, 200) : []};
     }),
     warnings: Array.isArray(input.warnings) ? input.warnings.filter(x => typeof x === 'string').slice(0, 10) : [],
@@ -121,8 +124,8 @@ function quickModel(input, sender, preset) {
   const model = modelFromSender(input, sender);
   const branch = model.branches.find(item => item.id === model.activeBranchId);
   const byId = new Map(model.messages.map(message => [message.id, message]));
-  model.messages = [...new Set(branch.messageIds)].map(id => byId.get(id)).filter(message => message &&
-    (preset === 'all' || message.role === (preset === 'questions' ? 'user' : 'assistant')));
+  model.messages = globalThis.GptExporter.filterVisibleMessages([...new Set(branch.messageIds)].map(id => byId.get(id)).filter(Boolean))
+    .filter(message => preset === 'all' || message.role === (preset === 'questions' ? 'user' : 'assistant'));
   if (!model.messages.length) throw new Error(preset === 'questions' ? '当前分支没有可导出的提问。' : preset === 'answers' ? '当前分支没有可导出的回答。' : '当前分支没有可导出的消息。');
   const ids = new Set(model.messages.map(message => message.id));
   const assetIds = new Set(model.messages.flatMap(message => message.assetIds));
@@ -185,7 +188,10 @@ async function quickExport(message, sender) {
       150000,() => `本地文件生成超时（${directPhase}），请使用 SELECT 打开导出页面重试。`);
     if (!result?.ok) throw new Error(result?.error || '后台文件生成失败。');
     if (typeof result.url !== 'string' || !result.url.startsWith('blob:' + chrome.runtime.getURL(''))) throw new Error('后台返回的下载地址无效。');
-    const baseName = model.title.replace(/[\\/:*?"<>|\u0000-\u001f\u007f]/g,'-').replace(/\s+/g,' ').replace(/[. ]+$/,'').trim().slice(0,100) || '对话导出';
+    const suffix = '.' + extensions[format];
+    const suggested = typeof result.filename === 'string' && result.filename.toLowerCase().endsWith(suffix)
+      ? result.filename.slice(0, -suffix.length) : model.title;
+    const baseName = suggested.replace(/[\\/:*?"<>|\u0000-\u001f\u007f]/g,'-').replace(/\s+/g,' ').replace(/[. ]+$/,'').trim().slice(0,100) || '对话导出';
     const filename = baseName + '.' + extensions[format];
     const downloadId = await chrome.downloads.download({url:result.url,filename,saveAs:false,conflictAction:'uniquify'});
     if (!Number.isInteger(downloadId)) throw new Error('浏览器未能启动下载。');

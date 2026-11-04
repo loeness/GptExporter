@@ -140,6 +140,21 @@
     "[data-testid*='regenerate' i]", "[data-testid*='retry' i]", "[data-testid*='copy' i]",
     ".sr-only", ".visually-hidden", ".cdk-visually-hidden"
   ].join(",");
+  const EXCLUDED_CONTENT = [
+    "[data-citation]", "[data-citation-id]", "[data-annotation-type='citation' i]",
+    "[data-testid*='citation' i]", "[data-testid*='sources' i]",
+    "[data-testid*='analysis' i]", "[data-testid*='reasoning' i]",
+    "[data-testid*='thinking' i]", "[data-testid*='thought' i]",
+    "[data-testid*='tool-call' i]", "[data-testid*='tool_call' i]",
+    "[data-message-channel='analysis' i]", "[data-channel='analysis' i]",
+    "[data-message-type='analysis' i]"
+  ].join(",");
+  const INTERNAL_CLASSIFICATIONS = new Set([
+    "internal", "private", "hidden", "tool", "tool_call", "function", "function_call",
+    "analysis", "thought", "thinking", "reasoning", "citation", "citations"
+  ]);
+  const TOOL_ROLES = new Set(["tool", "tool_call", "function", "browser", "python"]);
+  const CHATGPT_CITATION_TOKEN = /\uE200cite\b[\s\S]*?\uE201/gi;
   const WARNINGS = Object.freeze([
     "仅包含当前页面已加载并挂载的消息。",
     "完整会话历史不可用；未加载的更早消息不会导出。",
@@ -188,6 +203,54 @@
       if (role === "user" || role === "assistant") return role;
     }
     return "";
+  }
+
+  function isExcludedContentElement(element) {
+    if (!element || element.nodeType !== 1 || typeof element.matches !== "function") return false;
+    try { return element.matches(EXCLUDED_CONTENT); }
+    catch (_) { return false; }
+  }
+
+  function isMessageVisible(message) {
+    if (!message || typeof message !== "object") return false;
+    const role = String(message.role || "").trim().toLowerCase();
+    if (TOOL_ROLES.has(role)) return false;
+    const visibility = String(message.visibility || "").trim().toLowerCase();
+    if (["internal", "private", "hidden"].includes(visibility)) return false;
+    const classification = String(message.classification || "").trim().toLowerCase().replace(/[ -]+/g, "_");
+    if (INTERNAL_CLASSIFICATIONS.has(classification)) return false;
+    return true;
+  }
+
+  function stripCitationTokens(value, role) {
+    const text = String(value == null ? "" : value);
+    return String(role || "").trim().toLowerCase() === "user" ? text : text.replace(CHATGPT_CITATION_TOKEN, "");
+  }
+
+  function hasDisplayableContent(message) {
+    if ((Array.isArray(message.assetIds) && message.assetIds.length) ||
+        (Array.isArray(message.assets) && message.assets.length)) return true;
+    const markdown = stripCitationTokens(message.markdown || "", message.role).trim();
+    const text = stripCitationTokens(message.text || "", message.role).trim();
+    if (markdown || text) return true;
+    const html = stripCitationTokens(message.html || "", message.role);
+    if (/<img\b|data-ge-(?:image|asset)-/i.test(html)) return true;
+    return html.replace(/<!--(?:[\s\S]*?)-->/g, "")
+      .replace(/<[^>]*>/g, "")
+      .replace(/&(?:nbsp|#160|#xA0);/gi, " ")
+      .trim().length > 0;
+  }
+
+  function filterVisibleMessages(messages) {
+    if (!Array.isArray(messages)) return [];
+    return messages.filter((message) => isMessageVisible(message) && hasDisplayableContent(message))
+      .map((message) => {
+        const markdown = stripCitationTokens(message.markdown || "", message.role);
+        const text = stripCitationTokens(message.text || "", message.role);
+        const html = stripCitationTokens(message.html || "", message.role);
+        if (markdown === (message.markdown || "") && text === (message.text || "") && html === (message.html || "")) return message;
+        return { ...message, markdown, text, html };
+      });
   }
 
   function selectedMessages(scope, definition) {
@@ -290,6 +353,7 @@
 
   function shouldDropElement(element) {
     if (!element || element.nodeType !== 1 || isHiddenOrChrome(element)) return true;
+    if (isExcludedContentElement(element)) return true;
     const tag = String(element.localName || element.tagName || "").toLowerCase();
     if (DROP_TAGS.has(tag)) return true;
     try {
@@ -449,4 +513,7 @@
   namespace.supportedPlatforms = supportedPlatforms;
   namespace.getPlatform = getPlatform;
   namespace.collectPlatformConversation = collectPlatformConversation;
+  namespace.isExcludedContentElement = isExcludedContentElement;
+  namespace.isMessageVisible = isMessageVisible;
+  namespace.filterVisibleMessages = filterVisibleMessages;
 })(globalThis);

@@ -215,7 +215,9 @@
       table: {
         headerRows,
         widths: Array(columnCount).fill('*'),
-        body
+        body,
+        // Long rows must remain splittable; otherwise a message-sized cell can vanish at a page boundary.
+        dontBreakRows: false
       },
       layout: 'lightHorizontalLines',
       fontSize: 8.5,
@@ -439,7 +441,7 @@
       } else {
         let textRuns = [];
         const flushText = () => {
-          if (textRuns.length) output.push({ text: textRuns, style: 'paragraph', margin: [0, 0, 0, 7] });
+          if (textRuns.length) output.push({ text: wrapLongTokens(textRuns, Math.max(10, Math.floor(maxWidth / 11.5))), style: 'paragraph', margin: [0, 0, 0, 7] });
           textRuns = [];
         };
         for (const part of inlineParts) {
@@ -469,9 +471,15 @@
         const size = source && (source.mimeType === 'image/png' || source.mimeType === 'image/jpeg')
           ? imageDisplaySize(node, source, maxWidth, maxHeight)
           : null;
-        const isInlineMath = /^TeX:/.test(cleanText(node.getAttribute('alt') || '')) && size && size.height <= inlineMathMaxHeight;
+        const explicitlyInline = node.classList && node.classList.contains('ge-inline-math');
+        const isInlineMath = /^TeX:/.test(cleanText(node.getAttribute('alt') || '')) && size &&
+          (size.height <= inlineMathMaxHeight || (explicitlyInline && size.height <= inlineMathMaxHeight * 2));
         if (isInlineMath) {
-          inlineParts.push({ type: 'math', definition: renderImage(node, maxWidth, maxHeight) });
+          const definition = renderImage(node, maxWidth, maxHeight);
+          if (explicitlyInline && size.height > inlineMathMaxHeight && definition.width) {
+            definition.width = Math.max(0.75, Math.round(definition.width * inlineMathMaxHeight / size.height * 100) / 100);
+          }
+          inlineParts.push({ type: 'math', definition });
         } else {
           flushInlineParts();
           output.push(renderImage(node, maxWidth, maxHeight));
@@ -513,6 +521,57 @@
     const articleElements = Array.from(container.querySelectorAll ? container.querySelectorAll('article') : []);
     const articleIds = new Set(articleElements.map((article) => article.getAttribute('data-message-id')).filter(Boolean));
     const hasTaggedArticles = articleIds.size > 0;
+    let previousArticleRole = '';
+
+    const roleAvatar = (role, repeated) => {
+      const scale = repeated ? 0.78 : 1;
+      const size = 22 * scale;
+      const center = size / 2;
+      const radius = size / 2 - scale;
+      const isUser = role === 'user';
+      const background = isUser ? '#617b8a' : role === 'assistant' ? '#4e7865' : '#66736c';
+      const canvas = [{ type: 'ellipse', x: center, y: center, r1: radius, r2: radius, color: background }];
+      if (isUser) {
+        canvas.push(
+          { type: 'ellipse', x: center, y: center + 3.2 * scale, r1: 5.1 * scale, r2: 3.9 * scale, color: '#ffffff' },
+          { type: 'ellipse', x: center, y: center - 3.1 * scale, r1: 2.5 * scale, r2: 2.5 * scale, color: '#ffffff' }
+        );
+      } else {
+        canvas.push(
+          { type: 'line', x1: center, y1: center - 4.2 * scale, x2: center, y2: center - 6.3 * scale, lineColor: '#ffffff', lineWidth: 1.2 * scale },
+          { type: 'ellipse', x: center, y: center - 7 * scale, r1: 1.1 * scale, r2: 1.1 * scale, color: '#ffffff' },
+          { type: 'rect', x: center - 5.2 * scale, y: center - 4.1 * scale, w: 10.4 * scale, h: 8 * scale, r: 2 * scale, color: '#ffffff' },
+          { type: 'ellipse', x: center - 2.3 * scale, y: center - 0.7 * scale, r1: 0.8 * scale, r2: 0.8 * scale, color: background },
+          { type: 'ellipse', x: center + 2.3 * scale, y: center - 0.7 * scale, r1: 0.8 * scale, r2: 0.8 * scale, color: background },
+          { type: 'line', x1: center - 2 * scale, y1: center + 1.8 * scale, x2: center + 2 * scale, y2: center + 1.8 * scale, lineColor: background, lineWidth: 1 * scale }
+        );
+      }
+      return { width: size, canvas };
+    };
+
+    const alignPdfBlock = (block, alignment) => {
+      if (!block || typeof block !== 'object') return block;
+      if (Array.isArray(block)) return block.map((item) => alignPdfBlock(item, alignment));
+      const aligned = Object.assign({}, block);
+      if (Object.prototype.hasOwnProperty.call(aligned, 'text') || Object.prototype.hasOwnProperty.call(aligned, 'image')) {
+        aligned.alignment = alignment;
+      }
+      if (aligned.table) {
+        aligned.table = Object.assign({}, aligned.table, {
+          body: aligned.table.body.map((row) => row.map((cell) => alignPdfBlock(cell, alignment)))
+        });
+      }
+      for (const key of ['stack', 'ul', 'ol']) {
+        if (!Array.isArray(aligned[key])) continue;
+        aligned[key] = aligned[key].map((item) => {
+          if (item && typeof item === 'object' && Array.isArray(item.stack)) {
+            return Object.assign({}, item, { stack: item.stack.map((child) => alignPdfBlock(child, alignment)) });
+          }
+          return alignPdfBlock(item, alignment);
+        });
+      }
+      return aligned;
+    };
 
     const renderBlock = (node, context) => {
       if (!node) return [];
@@ -538,15 +597,43 @@
         if (id && !selectedIds.has(id)) return [];
         if (hasTaggedArticles && !id) return [];
         renderedArticleCount += 1;
-        const blocks = renderFlowChildren(node, context);
+        const heading = Array.from(node.children || []).find((child) => String(child.localName || '').toLowerCase() === 'h2') || null;
+        const headingRole = textOf(heading).trim().toLowerCase();
+        const messageRole = String(node.getAttribute('data-role') || headingRole).trim().toLowerCase();
+        const repeatedRole = Boolean(messageRole && previousArticleRole === messageRole);
+        if (messageRole) previousArticleRole = messageRole;
+        let blocks = renderFlowChildren(node, Object.assign({}, context, {
+          articleHeading: heading,
+          messageRole,
+          repeatedRole
+        }));
         const linkedAssets = attachments.byMessage.get(id || '');
         blocks.push(...attachmentContent(linkedAssets));
+        if (messageRole === 'user') blocks = blocks.map((block) => alignPdfBlock(block, 'right'));
         return blocks;
       }
       if (/^h[1-6]$/.test(tag)) {
+        if (tag === 'h2' && context.articleHeading === node) {
+          const roleText = inlineText(node);
+          const role = context.messageRole;
+          const style = context.repeatedRole ? 'roleHeaderContinuation' : role === 'user' ? 'roleHeaderUser' : role === 'assistant' ? 'roleHeaderAssistant' : 'roleHeader';
+          const avatar = roleAvatar(role, context.repeatedRole);
+          const avatarColumn = Object.assign({ width: avatar.width }, avatar);
+          const textColumn = {
+            width: '*',
+            text: Array.isArray(roleText) ? roleText : [{ text: String(roleText || '') }],
+            style,
+            alignment: role === 'user' ? 'right' : 'left'
+          };
+          return [{
+            columns: role === 'user' ? [textColumn, avatarColumn] : [avatarColumn, textColumn],
+            columnGap: 5,
+            margin: context.repeatedRole ? [0, 3, 0, 2] : [0, 6, 0, 4]
+          }];
+        }
         const level = Number(tag.slice(1));
         const isDocumentTitle = tag === 'h1' && String(node.parentElement && node.parentElement.localName || '').toLowerCase() === 'header';
-        return [{ text: inlineText(node), style: isDocumentTitle ? 'documentTitle' : `heading${level}`, margin: [0, level === 1 ? 3 : 9, 0, level === 1 ? 9 : 4], keepWithNext: true }];
+        return [{ text: inlineText(node), style: isDocumentTitle ? 'documentTitle' : `heading${level}`, margin: [0, level === 1 ? 3 : 9, 0, level === 1 ? 9 : 4] }];
       }
       if (tag === 'p') {
         return paragraphBlocks(node, width, maxHeight);
@@ -690,6 +777,10 @@
       styles: {
         documentTitle: { fontSize: 20, bold: true, color: '#263c33', margin: [0, 0, 0, 7] },
         paragraph: { fontSize: 10, lineHeight: 1.3 },
+        roleHeaderUser: { fontSize: 8, bold: true, color: '#617b8a', characterSpacing: 0.3 },
+        roleHeaderAssistant: { fontSize: 8, bold: true, color: '#4e7865', characterSpacing: 0.3 },
+        roleHeader: { fontSize: 8, bold: true, color: '#66736c', characterSpacing: 0.3 },
+        roleHeaderContinuation: { fontSize: 7.5, bold: true, color: '#87958d' },
         heading1: { fontSize: 18, bold: true, color: '#263c33' },
         heading2: { fontSize: 15, bold: true, color: '#30493e' },
         heading3: { fontSize: 13, bold: true, color: '#3d594d' },

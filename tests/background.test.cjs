@@ -76,6 +76,22 @@ test('retains graph metadata but strips credentials and binary data from session
   const saved=env.records['export:'+result.id];assert.equal(saved.source.complete,true);
   assert.deepEqual(Array.from(saved.branches[0].messageIds),['1']);assert.ok(!JSON.stringify(saved).includes('never-store'));
 });
+test('preserves branch topology and timestamps while quick export omits internal and empty messages',async()=>{
+  const env=setup();const input=branchedModel();
+  input.messages[0].createTime='2026-11-04T08:00:00.000Z';
+  input.messages.splice(1,0,
+    {id:'private-thought',role:'assistant',visibility:'internal',markdown:'private reasoning',text:'private reasoning',html:'<p>private reasoning</p>'},
+    {id:'tool-output',role:'tool',markdown:'private tool',text:'private tool',html:'<p>private tool</p>'},
+    {id:'empty',role:'assistant',markdown:'',text:'',html:''});
+  input.branches[0].messageIds.splice(1,0,'private-thought','tool-output','empty');
+  const opened=await env.send({type:'GPT_EXPORTER_OPEN',conversation:input});
+  const stored=env.records['export:'+opened.id];
+  assert.equal(stored.messages[0].createTime,'2026-11-04T08:00:00.000Z');
+  assert.ok(stored.branches[0].messageIds.includes('private-thought'));
+  const quick=await env.send({type:'GPT_EXPORTER_QUICK',conversation:input,preset:'all',format:'pdf'});
+  assert.equal(quick.ok,true);
+  assert.deepEqual(env.renders[0].conversation.messages.map(message=>message.id),['1','2','3','4']);
+});
 test('new platforms derive identity from the source URL and cannot claim full API history or cross-platform assets',async()=>{
   for (const [id,host] of [['claude','claude.ai'],['qwen','chat.qwen.ai'],['deepseek','chat.deepseek.com'],['kimi','www.kimi.com'],['gemini','gemini.google.com'],['doubao','www.doubao.com'],['grok','grok.com']]) {
     const env=setup();const input=model();input.url='https://'+host+'/conversation/example';

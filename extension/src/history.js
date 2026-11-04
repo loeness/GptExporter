@@ -12,6 +12,10 @@
   const MAX_TEXT_CHARS = 2 * 1024 * 1024;
   const MAX_ASSET_BYTES = 20 * 1024 * 1024;
   const ALLOWED_ROLES = new Set(["user", "assistant", "system", "tool"]);
+  const INTERNAL_MESSAGE_TYPES = new Set([
+    "analysis", "reasoning", "thinking", "thought", "chain_of_thought", "reasoning_recap",
+    "tool", "tool_call", "tool_result", "function_call", "function_result", "browser", "python"
+  ]);
   const SNAPSHOT_REQUEST = "GPT_EXPORTER_PAGE_SNAPSHOT_REQUEST";
   const SNAPSHOT_RESPONSE = "GPT_EXPORTER_PAGE_SNAPSHOT_RESPONSE";
 
@@ -73,6 +77,16 @@
     if (["function", "tool_call", "browser", "python"].includes(role)) return "tool";
     if (role === "developer") return "system";
     return role ? "tool" : "assistant";
+  }
+
+  function isInternalMessage(message, role, metadata) {
+    if (role === "system" || role === "tool") return true;
+    const channel = cleanString(metadata.channel, 80).trim().toLowerCase();
+    if (channel === "analysis") return true;
+    const messageType = cleanString(metadata.message_type, 80).trim().toLowerCase();
+    if (INTERNAL_MESSAGE_TYPES.has(messageType)) return true;
+    const recipient = typeof message.recipient === "string" ? message.recipient.trim() : "";
+    return role === "assistant" && !!recipient && recipient.toLowerCase() !== "all";
   }
 
   function escapeHtml(value) {
@@ -262,7 +276,7 @@
       return asset;
     }
 
-    function partText(part, messageId, metadata, localAssetIds) {
+    function partText(part, messageId, metadata, localAssetIds, partImageMarkers) {
       if (typeof part === "string") {
         if (part.length > MAX_TEXT_CHARS) {
           structurallyComplete = false;
@@ -276,7 +290,9 @@
         if (!asset) return "[Image]";
         localAssetIds.push(asset.id);
         const label = asset.name.replace(/([\[\]])/g, "\\$1");
-        return "![" + label + "](gpt-exporter-asset:" + encodeURIComponent(asset.id) + ")";
+        const marker = "![" + label + "](gpt-exporter-asset:" + encodeURIComponent(asset.id) + ")";
+        partImageMarkers.push(marker);
+        return marker;
       }
       if (typeof part.text === "string") {
         if (part.text.length > MAX_TEXT_CHARS) {
@@ -321,8 +337,13 @@
         addWarning(warnings, "消息 " + id + " 的 Markdown 超过处理上限。");
       }
       const partAssetIds = [];
-      const textParts = parts.map((part) => partText(part, id, metadata, partAssetIds)).filter(Boolean);
+      const partImageMarkers = [];
+      const textParts = parts.map((part) => partText(part, id, metadata, partAssetIds, partImageMarkers)).filter(Boolean);
       let markdown = fallback || textParts.join("\n");
+      if (fallback && partImageMarkers.length) {
+        const missingImageMarkers = partImageMarkers.filter((marker) => !fallback.includes(marker));
+        if (missingImageMarkers.length) markdown += (markdown ? "\n\n" : "") + missingImageMarkers.join("\n");
+      }
 
       const attachmentCandidates = [];
       let attachmentCount = 0;
@@ -355,6 +376,7 @@
       const normalized = {
         id, role, markdown: cleanString(markdown, MAX_TEXT_CHARS), text: cleanString(text, MAX_TEXT_CHARS),
         html: text ? "<p>" + escapeHtml(text).replace(/\n/g, "<br>") + "</p>" : "",
+        ...(isInternalMessage(message, role, metadata) ? { visibility: "internal" } : {}),
         ...(message.create_time != null ? { createTime: safeTime(message.create_time) || cleanString(message.create_time, 100) } : {}),
         ...(assetIds.length ? { assetIds } : {})
       };
@@ -888,15 +910,21 @@
         const metadataPath = "/backend-api/files/download/" + encodeURIComponent(fileId);
         if (parsedUrl.origin !== page.origin || !parsedUrl.pathname.startsWith("/backend-api/files/") ||
             (parsedUrl.pathname === metadataPath && parsedUrl.searchParams.has(parameter))) return;
-        const mediaHeaders = { Accept: cleanString(result.mime_type || mimeType, 200) || "application/octet-stream" };
-        if (token) mediaHeaders.Authorization = "Bearer " + token;
-        const mediaResponse = await fetchFn(candidateUrl, {
-          credentials: "include", redirect: "error", signal: requestSignal(), headers: mediaHeaders
-        });
-        dataUrl = await readAssetDataUrl(mediaResponse, cleanString(result.mime_type || mimeType, 200));
+        // Signed media hosts are fetched by the extension background, which has the
+        // required host permission. Do not send the ChatGPT bearer token cross-origin.
+        // Same-origin content endpoints can still be inlined here when available.
+        if (parsedUrl.origin === page.origin) {
+          const mediaHeaders = { Accept: cleanString(result.mime_type || mimeType, 200) || "application/octet-stream" };
+          if (token) mediaHeaders.Authorization = "Bearer " + token;
+          const mediaResponse = await fetchFn(candidateUrl, {
+            credentials: "include", redirect: "error", signal: requestSignal(), headers: mediaHeaders
+          });
+          dataUrl = await readAssetDataUrl(mediaResponse, cleanString(result.mime_type || mimeType, 200));
+        }
       });
     } catch (_) {
-      result = null;
+      // Keep valid metadata if media inlining failed; the background can fetch an
+      // approved URL without relying on page-world CORS behavior.
     }
     if (!isRecord(result)) return { ...asset, name, mimeType, status: "unavailable", error: "附件元数据不可用。" };
     const resolvedUrl = safeAssetUrl(result.download_url || result.public_url || result.url, model.url);

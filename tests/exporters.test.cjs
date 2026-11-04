@@ -6,6 +6,8 @@ const { JSDOM } = require('jsdom');
 
 const dom = new JSDOM('');
 global.DOMParser = dom.window.DOMParser;
+require('../extension/src/platforms.js');
+require('../extension/src/export-settings.js');
 require('../extension/src/exporters.js');
 
 const conversation = {
@@ -64,7 +66,7 @@ test('converts text, HTML, and JSON with their declared formats', () => {
   assert.match(html.content, /<strong>加粗<\/strong>/);
   const fragment = global.GptExporter.renderHtmlFragment(conversation, { includeMetadata: false });
   assert.doesNotMatch(fragment, /<html|<head|<style/i);
-  assert.match(fragment, /<article data-message-id="u1">/);
+  assert.match(fragment, /<article data-message-id="u1" data-role="user">/);
 
   assert.equal(json.extension, 'json');
   assert.equal(json.mime, 'application/json;charset=utf-8');
@@ -107,6 +109,7 @@ test('sanitizes untrusted HTML and removes remote resources before parsing', () 
 });
 
 test('sanitizes rendered snapshots while preserving selected raster images and safe attachment downloads', () => {
+  assert.match(global.GptExporter.sanitizeHtml('<img src="data:image/png;base64,iVBORw==" alt="TeX: x" class="ge-inline-math" width="39" height="45">'), /class="ge-inline-math"/);
   const renderedHtml = '<article data-message-id="u1"><h2>User</h2><img src="data:image/png;base64,iVBORw==" alt="plot" width="44" onerror="attack()"></article>' +
     '<article data-message-id="a1"><h2>Assistant</h2><img src="data:image/png;base64,iVBORw==" alt="snapshot" width="52" height="28"><img src="https://tracker.example/pixel" alt="remote">' +
     '<a href="data:application/pdf;base64,JVBERi0xLjQK" download="../answer.pdf" onclick="attack()">PDF</a>' +
@@ -179,7 +182,7 @@ test('annotates branch ownership for all-branch exports in Markdown, text, HTML,
   assert.match(markdown, /所属分支：路径 B\s+路径 B 的回答/);
   assert.match(text, /所属分支：路径 A、路径 B/);
   assert.equal((html.match(/class=\"branch-affiliations\"/g) || []).length, 3);
-  assert.match(html, /<article data-message-id=\"shared\">/);
+  assert.match(html, /<article data-message-id=\"shared\" data-role=\"user\">/);
   assert.deepEqual(json.selection, { branchId: '__all' });
   assert.deepEqual(json.branches.map((branch) => branch.id), ['a', 'b']);
 
@@ -224,16 +227,161 @@ test('rejects unsupported formats and malformed message input', () => {
   assert.throws(() => global.GptExporter.serialize(null), /无效/);
 });
 
+test('filters tool and analysis messages and ChatGPT citation tokens consistently while preserving user text, links, and image-only messages', () => {
+  const citation = '\uE200cite turn0search0\uE201';
+  const branched = {
+    schemaVersion: 2, title: 'Filter fixture', url: 'https://chatgpt.com/c/filter',
+    selection: { branchId: '__all' },
+    branches: [{ id: 'branch-a', label: 'Branch A', messageIds: ['u1', 'tool1', 'analysis1', 'a1', 'empty1', 'image1'] }],
+    messages: [
+      { id: 'u1', role: 'user', markdown: `Please keep ${citation} and [my link](<https://example.com/user>).`, text: `Please keep ${citation}`, html: `<p>Please keep ${citation} <a href="https://example.com/user">my link</a></p>` },
+      { id: 'tool1', role: 'tool', markdown: 'secret tool call', text: 'secret tool call', html: '<p>secret tool call</p>' },
+      { id: 'analysis1', role: 'assistant', visibility: 'internal', classification: 'analysis', markdown: 'private reasoning', text: 'private reasoning', html: '<p>private reasoning</p>' },
+      { id: 'a1', role: 'assistant', markdown: `Public answer ${citation} [official](<https://example.com/official>).`, text: `Public answer ${citation}`, html: `<p>Public answer ${citation} <a href="https://example.com/official">official</a><span data-testid="citation-source">citation source</span></p>` },
+      { id: 'empty1', role: 'assistant', markdown: `  ${citation}  `, text: citation, html: '' },
+      { id: 'image1', role: 'assistant', markdown: '![plot](gpt-exporter-asset:image1)', text: '', html: '', assetIds: ['image1'] }
+    ]
+  };
+
+  const markdown = global.GptExporter.serialize(branched, { format: 'markdown' }).content;
+  const text = global.GptExporter.serialize(branched, { format: 'text' }).content;
+  const html = global.GptExporter.serialize(branched, { format: 'html', includeMetadata: false }).content;
+  const json = JSON.parse(global.GptExporter.serialize(branched, { format: 'json' }).content);
+  const csv = global.GptExporter.serialize(branched, { format: 'csv', includeMetadata: false }).content;
+
+  for (const output of [markdown, text, html, JSON.stringify(json), csv]) {
+    assert.doesNotMatch(output, /secret tool call|private reasoning|citation source/);
+  }
+  assert.match(markdown, /Please keep/);
+  assert.match(markdown, /https:\/\/example\.com\/official/);
+  assert.match(html, /href="https:\/\/example\.com\/official"/);
+  assert.match(markdown, /turn0search0/, 'user literal citation token remains intact');
+  assert.doesNotMatch(json.messages.filter((message) => message.role === 'assistant').map((message) => message.markdown + message.text + message.html).join(' '), /turn0search0/);
+  assert.ok(json.messages.some((message) => message.id === 'image1'), 'image-only message remains visible');
+  assert.ok(json.messages.some((message) => message.id === 'u1' && message.markdown.includes(citation)), 'literal user text remains intact');
+  assert.deepEqual(branched.branches[0].messageIds, ['u1', 'tool1', 'analysis1', 'a1', 'empty1', 'image1'], 'filtering does not rewrite graph topology');
+  assert.equal((markdown.match(/^## assistant/gm) || []).length, 2, 'empty assistant body does not create an export heading');
+});
+
+test('exports conversation links and message timestamps only when enabled', () => {
+  const dated = {
+    ...conversation,
+    messages: [{ ...conversation.messages[0], createTime: '2026-11-04T10:20:00.000Z' }]
+  };
+  const defaults = global.GptExporter.serialize(dated, { format: 'json' }).content;
+  assert.match(defaults, /"url": "https:\/\/chatgpt\.com\/c\/example"/);
+  assert.doesNotMatch(defaults, /createTime/);
+
+  const formattedTime = global.GptExporter.exportSettings.formatTimestamp(dated.messages[0].createTime, {});
+  for (const format of ['markdown', 'text', 'html', 'json', 'csv']) {
+    const result = global.GptExporter.serialize(dated, {
+      format, includeMetadata: true, includeConversationLink: false, includeMessageTimestamp: true
+    }).content;
+    const output = typeof result === 'string' ? result : String(result);
+    assert.ok(output.replace(/\\/g, '').includes(formattedTime), format);
+    if (format === 'json') assert.doesNotMatch(output, /"url": "https:\/\/chatgpt\.com/);
+    else assert.doesNotMatch(output, /https:\/\/chatgpt\.com\/c\/example/, format);
+  }
+});
+
+test('applies non-PDF title, user details, role labels, and timestamp settings across all formats', () => {
+  const input = {
+    schemaVersion: 2,
+    title: 'Private conversation title',
+    url: 'https://chatgpt.com/c/settings?token=secret#fragment',
+    exportedAt: '2026-11-04T12:34:56.000Z',
+    warnings: [],
+    messages: [
+      { id: 'u-settings', role: 'user', createTime: '2026-11-04T10:20:30.000Z', markdown: 'A question', text: 'A question', html: '<p>A question</p>' },
+      { id: 'a-settings', role: 'assistant', createTime: '2026-11-04T10:21:30.000Z', markdown: 'An answer', text: 'An answer', html: '<p>An answer</p>' }
+    ]
+  };
+  const settings = {
+    includeMetadata: true,
+    includeConversationLink: true,
+    includeMessageTimestamp: true,
+    includeTitleInNonPdf: false,
+    includeUserName: true,
+    userName: 'Ethan Li',
+    includeUserEmail: true,
+    userEmail: 'ethan@example.com',
+    dateFormat: 'DD-MM-YYYY',
+    timeFormat: '12h',
+    customizeRoleNames: true,
+    roleNames: { user: '提问人', assistant: '回答者', system: '系统', tool: '工具' }
+  };
+  const expectedTime = global.GptExporter.exportSettings.formatTimestamp(input.messages[0].createTime, settings);
+  const output = Object.fromEntries(['markdown', 'text', 'html', 'json', 'csv'].map((format) => [
+    format, global.GptExporter.serialize(input, { ...settings, format }).content
+  ]));
+
+  for (const format of ['markdown', 'text', 'html', 'json', 'csv']) {
+    const normalized = output[format].replace(/\\/g, '');
+    assert.match(normalized, /Ethan Li/, format);
+    assert.match(normalized, /ethan@example\.com/, format);
+    assert.match(normalized, new RegExp(expectedTime.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), format);
+    assert.doesNotMatch(output[format], /Private conversation title|token=secret|#fragment/, format);
+  }
+  assert.match(output.markdown, /## 提问人/);
+  assert.match(output.text, /\[提问人\]/);
+  assert.match(output.html, /<span class="message-avatar" aria-hidden="true"><\/span>提问人 <time/);
+  assert.match(output.html, /<a href="https:\/\/chatgpt\.com\/c\/settings">/);
+  const parsed = JSON.parse(output.json);
+  assert.equal(parsed.title, undefined);
+  assert.equal(parsed.messages[0].role, 'user');
+  assert.equal(parsed.messages[0].roleLabel, '提问人');
+  assert.equal(parsed.userName, 'Ethan Li');
+  assert.equal(parsed.userEmail, 'ethan@example.com');
+  assert.match(output.csv, /"id","role","roleLabel","createTime"/);
+  assert.match(output.csv, /"u-settings","user","提问人"/);
+});
+
+test('does not export user details by default and preserves HTML snapshot media while relabeling headers', () => {
+  const input = {
+    ...conversation,
+    messages: [{ ...conversation.messages[1], createTime: '2026-11-04T10:20:30.000Z' }]
+  };
+  const settings = {
+    includeUserName: true, userName: 'Private name', includeUserEmail: true, userEmail: 'private@example.com'
+  };
+  const defaults = global.GptExporter.serialize(input, { format: 'json' }).content;
+  assert.doesNotMatch(defaults, /Private name|private@example\.com/);
+
+  const renderedHtml = '<article data-message-id="a1" data-role="assistant"><h2><span class="message-avatar" aria-hidden="true"></span>assistant<time>old time</time></h2>' +
+    '<div class="message-body"><img src="data:image/png;base64,iVBORw==" alt="plot"><span data-ge-math="inline" data-ge-tex="x^2">x²</span></div></article>';
+  const result = global.GptExporter.serialize(input, {
+    format: 'html', includeMetadata: false, includeMessageTimestamp: true, dateFormat: 'MM-DD-YYYY',
+    timeFormat: '24h', customizeRoleNames: true, roleNames: { assistant: 'Answer' }, renderedHtml
+  });
+  assert.match(result.content, /<span class="message-avatar" aria-hidden="true"><\/span>Answer <time datetime="2026-11-04T10:20:30\.000Z">/);
+  assert.match(result.content, /<img src="data:image\/png;base64,iVBORw==" alt="plot">/);
+  assert.match(result.content, /data-ge-math="inline" data-ge-tex="x\^2"/);
+
+  const preview = global.GptExporter.renderHtmlFragment(input, {
+    includeMetadata: false, includeMessageTimestamp: true, dateFormat: 'DD-MM-YYYY', timeFormat: '12h',
+    customizeRoleNames: true, roleNames: { assistant: 'Answer' }
+  });
+  const formatted = global.GptExporter.exportSettings.formatTimestamp(input.messages[0].createTime, {
+    dateFormat: 'DD-MM-YYYY', timeFormat: '12h'
+  });
+  assert.ok(preview.includes(`>${formatted}</time>`));
+  assert.ok(preview.includes('>Answer'));
+});
+
 test('reader demo clears preview DOM for empty selection and explicit clear', async () => {
   const readerPath = path.join(__dirname, '..', 'extension', 'reader.html');
   const exporterPath = path.join(__dirname, '..', 'extension', 'src', 'exporters.js');
   const readerScriptPath = path.join(__dirname, '..', 'extension', 'src', 'reader.js');
+  const platformsPath = path.join(__dirname, '..', 'extension', 'src', 'platforms.js');
+  const exportSettingsPath = path.join(__dirname, '..', 'extension', 'src', 'export-settings.js');
   const dom = new JSDOM(fs.readFileSync(readerPath, 'utf8'), {
     url: 'https://extension.test/reader.html?demo=1',
     runScripts: 'outside-only',
     pretendToBeVisual: true
   });
   try {
+    dom.window.eval(fs.readFileSync(platformsPath, 'utf8'));
+    dom.window.eval(fs.readFileSync(exportSettingsPath, 'utf8'));
     dom.window.eval(fs.readFileSync(exporterPath, 'utf8'));
     dom.window.eval(fs.readFileSync(readerScriptPath, 'utf8'));
     await new Promise((resolve) => setTimeout(resolve, 20));

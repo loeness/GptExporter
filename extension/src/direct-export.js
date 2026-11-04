@@ -38,14 +38,6 @@
     }
   }
 
-  function safeBaseName(title) {
-    return String(title || '对话导出')
-      .replace(/[\\/:*?"<>|\u0000-\u001f\u007f]/g, '-')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, 100) || '对话导出';
-  }
-
   function matchingAssets(model) {
     if (!Array.isArray(model.assets)) return [];
     const messageIds = new Set(model.messages.map((message) => message.id));
@@ -71,7 +63,9 @@
     }
 
     const stage = root.document.createElement('div');
-    stage.innerHTML = api.renderHtmlFragment(model, {includeMetadata: true, messages: model.messages});
+    stage.innerHTML = api.renderHtmlFragment(model, {includeMetadata: true, messages: model.messages,
+      includeConversationLink:context.settings.includeConversationLink, includeMessageTimestamp:context.settings.includeMessageTimestamp,
+      dateFormat:context.settings.dateFormat, timeFormat:context.settings.timeFormat});
     content.replaceChildren(stage);
     context.model = model;
     context.stage = stage;
@@ -87,6 +81,7 @@
     const api = root.GptExporter;
     if (!api || typeof api.serialize !== 'function') throw new Error('本地导出组件不可用，请重新加载扩展后重试。');
     const model = context.model;
+    context.settings = await api.exportSettings.read();
     const messages = model.messages;
     let result;
 
@@ -107,6 +102,8 @@
           conversation: model,
           messages,
           includeMetadata: true,
+          includeConversationLink: context.settings.includeConversationLink,
+          includeMessageTimestamp: context.settings.includeMessageTimestamp,
           pageSize: 'A4',
           orientation: 'portrait'
         });
@@ -114,14 +111,17 @@
         result = {content: bytes, mime: 'application/pdf', extension: 'pdf'};
       } else {
         result = api.serialize(model, {
+          ...context.settings,
           format,
           includeMetadata: true,
           messages,
-          renderedHtml: snapshot.innerHTML
+          renderedHtml: snapshot.innerHTML,
+          includeConversationLink:context.settings.includeConversationLink, includeMessageTimestamp:context.settings.includeMessageTimestamp
         });
       }
     } else {
-      result = api.serialize(model, {format, includeMetadata: true, messages});
+      result = api.serialize(model, {...context.settings,format, includeMetadata: true, messages,
+        includeConversationLink:context.settings.includeConversationLink, includeMessageTimestamp:context.settings.includeMessageTimestamp});
     }
 
     assertCurrent(context);
@@ -133,7 +133,7 @@
     return {
       ok: true,
       url: context.url,
-      filename: `${safeBaseName(model.title)}.${result.extension}`,
+      filename: api.exportSettings.filename(model.title, result.extension, context.settings),
       mime: result.mime,
       missingAssets: (model.assets || []).filter((asset) => asset.status === 'unavailable').length
     };

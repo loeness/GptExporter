@@ -221,6 +221,44 @@ Second line</span>
   assert.ok(parserDocument.querySelector("annotation[encoding='application/x-tex']"));
 });
 
+test("filters internal message classifications and citation markup while preserving user wording and image messages", () => {
+  const citation = "\uE200cite turn0search0\uE201";
+  const messages = platforms.filterVisibleMessages([
+    { id: "tool", role: "tool", markdown: "tool secret", text: "tool secret", html: "<p>tool secret</p>" },
+    { id: "analysis", role: "assistant", classification: "analysis", markdown: "private thought", text: "private thought" },
+    { id: "empty", role: "assistant", markdown: ` ${citation} `, text: citation },
+    { id: "user", role: "user", markdown: `I wrote ${citation}`, text: `I wrote ${citation}` },
+    { id: "assistant", role: "assistant", markdown: `Answer ${citation}`, text: `Answer ${citation}` },
+    { id: "image", role: "assistant", markdown: "", text: "", html: "", assetIds: ["image-1"] }
+  ]);
+
+  assert.deepEqual(messages.map((message) => message.id), ["user", "assistant", "image"]);
+  assert.match(messages[0].text, /turn0search0/);
+  assert.doesNotMatch(messages[1].text, /turn0search0/);
+  assert.ok(platforms.isMessageVisible({ role: "assistant", visibility: "internal" }) === false);
+});
+
+test("removes marked citations and reasoning blocks from provider DOM while keeping ordinary links", () => {
+  const fixture = fixtures.find(({ id }) => id === "claude");
+  const result = collect(fixture, `
+    <main>
+      <div data-testid="transcript-row" data-index="0" data-rs-index="0">
+        <div data-testid="user-message" data-message-id="u1">I typed \uE200cite turn0search0\uE201</div>
+      </div>
+      <div data-testid="transcript-row" data-index="1" data-rs-index="1">
+        <div data-testid="assistant-message" data-message-id="a1">
+          <p>Answer <a href="https://example.com/docs">ordinary link</a> \uE200cite turn0search0\uE201</p>
+          <span data-testid="citation-source">Source card</span>
+          <div data-testid="reasoning-content">Private reasoning</div>
+        </div>
+      </div>
+    </main>`);
+  assert.match(result.messages[0].text, /turn0search0/);
+  assert.doesNotMatch(result.messages[1].text, /turn0search0|Source card|Private reasoning/);
+  assert.match(result.messages[1].html, /ordinary link/);
+  assert.doesNotMatch(result.messages[1].html, /citation-source|reasoning-content|Source card|Private reasoning/);
+});
+
 test("deduplicates nested role markers and strips their role attributes in the parser clone", () => {
   const fixture = fixtures.find(({ id }) => id === "qwen");
   const originalExtract = platforms.extractConversation;

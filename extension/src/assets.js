@@ -4,7 +4,7 @@
   const MAX_TOTAL_BYTES = 40 * 1024 * 1024;
   api.loadConversationAssets = async function loadConversationAssets(model, options = {}) {
     if (!Array.isArray(model.assets) || !model.assets.length) return model;
-    let bytes = model.assets.reduce((sum, asset) => sum + (asset.dataUrl?.length || 0) * .75, 0);
+    let bytes = Math.max(0, Number(options.initialBytes) || 0) + model.assets.reduce((sum, asset) => sum + (asset.dataUrl?.length || 0) * .75, 0);
     let completed = 0;
     const deadline=Date.now()+90000;
     // Sequential fetches bound transient memory and avoid burst requests to signed-media endpoints.

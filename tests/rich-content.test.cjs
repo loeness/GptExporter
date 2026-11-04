@@ -140,7 +140,7 @@ test('snapshots embed READY raster media and safe downloads without SVG or remot
 
   assert.equal(snapshot.querySelectorAll('svg,script,foreignObject').length, 0);
   assert.equal(snapshot.querySelectorAll('img[src="data:image/png;base64,iVBORw=="]').length, 2, html);
-  assert.match(html, /alt="TeX: x" width="24" height="12"/);
+  assert.match(html, /alt="TeX: x" class="ge-inline-math" width="24" height="12"/);
   assert.match(html, /href="data:application\/pdf;base64,JVBERi0xLjQK" download="report\.pdf"/);
   assert.doesNotMatch(html, /data-ge-image-ref|data-ge-asset-id|https:\/\/tracker|data:text\/html|image\/svg\+xml/);
 });

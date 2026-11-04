@@ -7,6 +7,55 @@
   <div class="formats" aria-label="支持的格式"><span>PDF</span><span>Markdown</span><span>TXT</span><span>HTML</span><span>JSON</span></div>
   <button id="open" type="button">预览当前对话 <span aria-hidden="true">↗</span></button>
   <p id="status" role="status" aria-live="polite">支持 ChatGPT、Claude、Qwen、DeepSeek、Kimi、Gemini、豆包和 Grok。</p>
+  <details class="settings" open>
+    <summary>导出设置</summary>
+    <div class="settings-list">
+      <label class="setting-row"><input id="setting-show-toolbar" data-setting="showToolbarButton" type="checkbox"><span>显示对话页导出按钮</span></label>
+      <label class="setting-row"><input id="setting-close-reader" data-setting="closeSelectionAfterExport" type="checkbox"><span>导出后关闭选择窗口</span></label>
+      <label class="setting-field" for="setting-filename-format">文件名格式
+        <select id="setting-filename-format" data-setting="filenameFormat">
+          <option value="title">对话标题</option>
+          <option value="date-title">日期 + 对话标题</option>
+          <option value="custom-title">自定义前缀 + 对话标题</option>
+        </select>
+      </label>
+      <label class="setting-field custom-prefix" id="custom-prefix-row" for="setting-custom-prefix" hidden>自定义前缀
+        <input id="setting-custom-prefix" data-setting="customFilenamePrefix" type="text" maxlength="50" autocomplete="off" placeholder="例如：工作笔记">
+      </label>
+      <label class="setting-row"><input id="setting-conversation-link" data-setting="includeConversationLink" type="checkbox"><span>在导出内容中包含对话链接</span></label>
+      <label class="setting-row"><input id="setting-message-timestamp" data-setting="includeMessageTimestamp" type="checkbox"><span>显示消息时间戳</span></label>
+      <label class="setting-row"><input id="setting-include-title" data-setting="includeTitleInNonPdf" type="checkbox"><span>非 PDF 导出中包含标题</span></label>
+      <label class="setting-row"><input id="setting-include-user-name" data-setting="includeUserName" type="checkbox"><span>在非 PDF 导出中包含我的姓名</span></label>
+      <label class="setting-field" for="setting-user-name">姓名
+        <input id="setting-user-name" data-setting="userName" type="text" maxlength="80" autocomplete="name" placeholder="仅在上方开关开启时使用" disabled>
+      </label>
+      <label class="setting-row"><input id="setting-include-user-email" data-setting="includeUserEmail" type="checkbox"><span>在非 PDF 导出中包含我的邮箱</span></label>
+      <label class="setting-field" for="setting-user-email">邮箱
+        <input id="setting-user-email" data-setting="userEmail" type="email" maxlength="254" autocomplete="email" placeholder="仅在上方开关开启时使用" disabled>
+      </label>
+      <label class="setting-field" for="setting-date-format">日期格式
+        <select id="setting-date-format" data-setting="dateFormat">
+          <option value="YYYY-MM-DD">YYYY-MM-DD</option>
+          <option value="DD-MM-YYYY">DD-MM-YYYY</option>
+          <option value="MM-DD-YYYY">MM-DD-YYYY</option>
+        </select>
+      </label>
+      <label class="setting-field" for="setting-time-format">时间格式
+        <select id="setting-time-format" data-setting="timeFormat"><option value="24h">24 小时</option><option value="12h">12 小时</option></select>
+      </label>
+      <label class="setting-row"><input id="setting-custom-roles" data-setting="customizeRoleNames" type="checkbox"><span>自定义非 PDF 导出角色名称</span></label>
+      <div class="role-fields" id="role-fields" hidden>
+        <label class="setting-field">User<input data-role="user" type="text" maxlength="40" value="User"></label>
+        <label class="setting-field">Assistant<input data-role="assistant" type="text" maxlength="40" value="Assistant"></label>
+        <label class="setting-field">System<input data-role="system" type="text" maxlength="40" value="System"></label>
+        <label class="setting-field">Tool<input data-role="tool" type="text" maxlength="40" value="Tool"></label>
+      </div>
+      <label class="setting-row"><input id="setting-copy-clipboard" data-setting="copyToClipboardAfterExport" type="checkbox"><span>导出非 PDF 后复制内容到剪贴板</span></label>
+      <div class="download-location"><span>下载保存位置由浏览器管理</span><button id="open-download-settings" class="secondary-button" type="button">打开下载设置</button></div>
+    </div>
+    <p id="settings-status" class="settings-status" role="status" aria-live="polite"></p>
+    <p class="settings-note">关闭姓名或邮箱开关会清除对应输入。思考过程、网络来源、深度研究参考文献和模型名称依赖平台当前数据结构，暂不提供导出开关。</p>
+  </details>
   <p class="hint">ChatGPT 优先读取完整历史与分支；其他平台读取当前页面已加载的对话，并明确提示范围。</p></main>
   <footer><span class="dot"></span>本地生成 · 使用当前会话 · 无额外账号</footer>
 </body></html>

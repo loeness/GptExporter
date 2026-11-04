@@ -131,6 +131,27 @@ test("sanitizes active payloads and keeps image alt text out of preview media", 
   assert.ok(!message.html.includes("https://tracker.example/pixel.png"));
 });
 
+test("removes explicit assistant citation markers without changing user wording or ordinary links", () => {
+  const citation = "\uE200cite turn0search0\uE201";
+  const result = extract(`
+    <main>
+      <div data-message-author-role="user" data-message-id="user-citation">I typed ${citation} and <a href="https://example.com/user">a normal link</a>.</div>
+      <div data-message-author-role="assistant" data-message-id="assistant-citation">
+        <p>Answer ${citation} <a href="https://example.com/source">ordinary link</a></p>
+        <span data-testid="citation-source">citation source card</span>
+        <div data-testid="reasoning-content">private reasoning</div>
+      </div>
+    </main>`);
+
+  assert.equal(result.messages.length, 2);
+  assert.match(result.messages[0].markdown, /turn0search0/);
+  assert.match(result.messages[0].html, /href="https:\/\/example\.com\/user"/);
+  assert.doesNotMatch(result.messages[1].markdown, /turn0search0|citation source|private reasoning/);
+  assert.doesNotMatch(result.messages[1].text, /turn0search0|citation source|private reasoning/);
+  assert.match(result.messages[1].html, /ordinary link/);
+  assert.doesNotMatch(result.messages[1].html, /citation-source|reasoning-content|citation source|private reasoning/);
+});
+
 test("uses conversation-turn fallback when role data is unavailable and ignores unrelated articles", () => {
   const result = extract(`
     <main>

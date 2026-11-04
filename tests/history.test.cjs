@@ -104,6 +104,93 @@ test("normalizes the complete mapping, all branches, raw Markdown, and media met
   assert.equal(model.messages[0].createTime, new Date(1700000000 * 1000).toISOString());
 });
 
+test("marks internal system, tool, thinking, and tool-call messages without changing branch content", () => {
+  const entries = [
+    { id: "system-root", role: "system" },
+    { id: "python-tool", role: "python" },
+    { id: "analysis", role: "assistant", metadata: { channel: "analysis" } },
+    { id: "commentary", role: "assistant", metadata: { channel: "commentary" } },
+    { id: "reasoning-recap", role: "assistant", metadata: { message_type: "reasoning_recap" } },
+    { id: "tool-call", role: "assistant", recipient: "browser.search", metadata: { message_type: "tool_call" } },
+    { id: "all-recipient", role: "assistant", recipient: "all" },
+    { id: "empty-recipient", role: "assistant", recipient: "  " }
+  ];
+  const mapping = {};
+  entries.forEach((entry, index) => {
+    const previous = entries[index - 1];
+    const next = entries[index + 1];
+    mapping[entry.id] = {
+      parent: previous ? previous.id : null,
+      children: next ? [next.id] : [],
+      message: {
+        id: entry.id,
+        author: { role: entry.role },
+        ...(entry.recipient !== undefined ? { recipient: entry.recipient } : {}),
+        metadata: entry.metadata || {},
+        content: { content_type: "text", parts: [entry.id + " body"] }
+      }
+    };
+  });
+  const ids = entries.map((entry) => entry.id);
+  const model = globalThis.GptExporter.normalizeConversation(graph({ mapping, current_node: ids.at(-1) }), {
+    url: "https://chatgpt.com/c/" + IDS.conversation,
+    kind: "api",
+    complete: true
+  });
+
+  assert.deepEqual(model.messages.map((message) => message.id), ids);
+  assert.deepEqual(model.branches[0].messageIds, ids);
+  assert.deepEqual(model.messages.filter((message) => message.visibility === "internal").map((message) => message.id), [
+    "system-root", "python-tool", "analysis", "reasoning-recap", "tool-call"
+  ]);
+  assert.equal(model.messages.find((message) => message.id === "python-tool").role, "tool");
+  assert.equal(model.messages.find((message) => message.id === "commentary").visibility, undefined);
+  assert.equal(model.messages.find((message) => message.id === "all-recipient").visibility, undefined);
+  assert.equal(model.messages.find((message) => message.id === "empty-recipient").visibility, undefined);
+  for (const message of model.messages) {
+    assert.equal(message.markdown, message.id + " body");
+    assert.equal(message.text, message.id + " body");
+  }
+});
+
+test("keeps image placeholders when fallback Markdown replaces message parts", () => {
+  const raw = {
+    conversation_id: IDS.conversation,
+    current_node: "user-image",
+    mapping: {
+      "user-image": {
+        parent: null,
+        children: [],
+        message: {
+          id: "user-image",
+          author: { role: "user" },
+          metadata: {
+            image_gen_title: "Chart",
+            model_dil_v2: { fallbackMarkdown: "Rendered fallback" }
+          },
+          content: {
+            content_type: "multimodal_text",
+            parts: [
+              "Original message text",
+              { content_type: "image_asset_pointer", asset_pointer: "sediment://synthetic-image-1" }
+            ]
+          }
+        }
+      }
+    }
+  };
+  const model = globalThis.GptExporter.normalizeConversation(raw, {
+    url: "https://chatgpt.com/c/" + IDS.conversation,
+    kind: "api",
+    complete: true
+  });
+
+  assert.equal(model.messages[0].markdown, "Rendered fallback\n\n![Chart](gpt-exporter-asset:asset-1)");
+  assert.match(model.messages[0].text, /\[Image: Chart\]/);
+  assert.deepEqual(model.messages[0].assetIds, ["asset-1"]);
+  assert.equal(model.assets[0].fileId, "synthetic-image-1");
+});
+
 test("marks cycles, missing parents, and flat message payloads incomplete", () => {
   const cyclic = graph({
     current_node: "assistant-a",
@@ -344,6 +431,8 @@ test("resolves file metadata only for permitted signed URL hosts", async () => {
   assert.equal(resolved.size, 123);
   assert.ok(calls.some((call) => call.url.includes("conversation_id=" + IDS.conversation) &&
     call.headers.Authorization === "Bearer asset-fixture-token"));
+  assert.ok(calls.every((call) => !call.url.startsWith("https://files.oaiusercontent.com/")),
+    "signed media is left for the extension background instead of a page-context cross-origin request");
   assert.ok(calls.every((call) => call.signal && call.signal.aborted === false));
   assert.ok(!JSON.stringify(resolved).includes("asset-fixture-token"));
 
@@ -353,6 +442,27 @@ test("resolves file metadata only for permitted signed URL hosts", async () => {
   }, model, { fetch: async () => { externalFetchCount++; return response({}); } });
   assert.equal(rejected.status, "unavailable");
   assert.equal(externalFetchCount, 0);
+});
+
+test("keeps approved file metadata when same-origin media inlining fails", async () => {
+  const url = "https://chatgpt.com/c/" + IDS.conversation;
+  const mediaUrl = "https://chatgpt.com/backend-api/files/content/synthetic-file-1";
+  const fakeFetch = async (requestUrl) => {
+    if (requestUrl.endsWith("/api/auth/session")) return response({ accessToken: "asset-fixture-token" });
+    if (requestUrl.includes("/backend-api/files/download/synthetic-file-1")) {
+      return response({ file_name: "chart.png", mime_type: "image/png", download_url: mediaUrl });
+    }
+    if (requestUrl === mediaUrl) throw new Error("synthetic media stream failure");
+    return response({}, 404);
+  };
+  const resolved = await globalThis.GptExporter.resolveAsset({
+    id: "asset-1", messageId: "user-a", kind: "image", fileId: "synthetic-file-1", name: "chart.png", mimeType: "image/png", status: "pending"
+  }, { url, source: { kind: "api", conversationId: IDS.conversation } }, { fetch: fakeFetch });
+
+  assert.equal(resolved.status, "ready");
+  assert.equal(resolved.url, mediaUrl);
+  assert.equal(resolved.dataUrl, undefined);
+  assert.equal(resolved.name, "chart.png");
 });
 
 test("keeps same-origin attachment Authorization local and returns only its bounded data URL", async () => {

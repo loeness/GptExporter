@@ -1,6 +1,6 @@
 {
   "name": "gpt-exporter",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "private": true,
   "description": "An independent local-first ChatGPT conversation exporter for Chromium",
   "scripts": {

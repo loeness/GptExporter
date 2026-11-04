@@ -28,7 +28,7 @@ function graph(id=CID){
   add('u0','root','user',['完整历史测试：请保留数学、图表和附件。']);
   const rich=String.raw`## 中文 PDF 与富内容验收
 
-可搜索文字：精确还原测试 ABC123。
+可搜索文字：精确还原测试 ABC123。citeturn0search0
 
 行内数学 $E=mc^2$，显示公式：
 
@@ -56,7 +56,9 @@ if True:
 ~~~`;
   add('a0','u0','assistant',[rich,{content_type:'image_asset_pointer',asset_pointer:'sediment://file-image-fixture'}],
     {attachments:[{id:'file-attachment-fixture',name:'notes.txt',mime_type:'text/plain'}]});
-  let parent='a0';
+  add('tool-internal','a0','tool',['TOOL_SECRET_FIXTURE']);
+  add('thinking-internal','tool-internal','assistant',['THINKING_SECRET_FIXTURE'],{channel:'analysis'});
+  let parent='thinking-internal';
   for(let index=1;index<=8;index++){
     add('u'+index,parent,'user',[`历史问题 ${index}，此消息未出现在页面 DOM。`]);
     add('a'+index,'u'+index,'assistant',[Array.from({length:10},(_,line)=>`历史回答 ${index}.${line+1}：保留中文、标点和可搜索文本。分页后的内容也应完整。`).join('\n\n')]);
@@ -127,11 +129,16 @@ function isPdfFile(file){
       assert.equal(response.ok,true);return {page,model:response.conversation};
     }
     const {page:chat,model}=await collect('https://chatgpt.com/c/'+CID);
-    assert.equal(model.messages.length,19);assert.equal(model.branches.length,2);assert.equal(model.source.complete,true);
+    assert.equal(model.messages.length,21);assert.equal(model.branches.length,2);assert.equal(model.source.complete,true);
     assert.equal(model.assets.length,2);assert.ok(!JSON.stringify(model).includes('fixture-only-token'));
     checks.push('full API graph beyond mounted DOM','all branches','no token in exported model');
     const [tab]=await worker.evaluate(async url=>chrome.tabs.query({url}),'https://chatgpt.com/c/'+CID);
     const popup=await context.newPage();await popup.goto(base+'popup.html');
+    await popup.locator('#setting-show-toolbar').uncheck();
+    await chat.waitForFunction(()=>document.getElementById('gpt-exporter-launcher')?.hidden === true);
+    await popup.locator('#setting-show-toolbar').check();
+    await chat.waitForFunction(()=>document.getElementById('gpt-exporter-launcher')?.hidden === false);
+    checks.push('popup switch hides and restores the page launcher');
     await worker.evaluate(id=>chrome.tabs.update(id,{active:true}),tab.id);
     const readerPromise=context.waitForEvent('page');await popup.evaluate(()=>document.getElementById('open').click());
     const reader=await readerPromise;reader.setDefaultTimeout(30000);await reader.waitForSelector('#message-list input');
@@ -142,6 +149,11 @@ function isPdfFile(file){
     for(const label of ['输入数据','本地处理','导出文档'])assert.ok(diagramText.includes(label),'Mermaid label missing: '+label);
     assert.equal(await reader.locator('svg.ge-mermaid-diagram foreignObject').count(),0);
     checks.push('real popup to full reader','KaTeX rendering','Mermaid rendering');
+    await reader.waitForSelector('#preview-content img[src^="data:image/"]');
+    assert.doesNotMatch(await reader.locator('#preview-content').innerText(), /TOOL_SECRET_FIXTURE|THINKING_SECRET_FIXTURE|turn0search0/);
+    assert.equal(await reader.locator('#preview-content article[data-role="user"]').count(),9);
+    assert.equal(await reader.locator('#preview-content article[data-role="assistant"]').count(),9);
+    checks.push('automatic image preview and filtering of internal messages and citations');
     await reader.locator('#load-media').click();
     await reader.waitForFunction(()=>!document.getElementById('load-media').disabled);
     const assetResponses=await reader.evaluate(async ids=>{const exportId=new URL(location.href).searchParams.get('id');return Promise.all(ids.map(assetId=>chrome.runtime.sendMessage({type:'GPT_EXPORTER_ASSET',exportId,assetId})));},model.assets.map(asset=>asset.id));
@@ -244,6 +256,7 @@ function isPdfFile(file){
       return {file:item.filename,...readPdfContent(item.filename)};
     };
     const allQuick=await quickPdf('all',18);const allQuickText=allQuick.text;
+    assert.doesNotMatch(allQuickText,/TOOL_SECRET_FIXTURE|THINKING_SECRET_FIXTURE|turn0search0/);
     assert.match(allQuickText,/完整历史测试：请保留数学、图表和附件/);
     assert.match(allQuickText,/历史问题 8/);
     assert.match(allQuickText,/历史回答 8\.10/);
@@ -268,18 +281,44 @@ function isPdfFile(file){
     assert.doesNotMatch(answersQuickText,/另一个分支的回答/);
     assert.equal((answersQuickText.match(/历史回答 \d+\.\d+：/g)||[]).length,80,'Answers contains all eight numbered historical assistant answers');
     checks.push('Answers quick PDF contains assistant history only');
-    const shared=await collect('https://chatgpt.com/share/'+SID);assert.equal(shared.model.source.kind,'shared');assert.equal(shared.model.messages.length,19);await shared.page.close();
+    await worker.evaluate(async()=>chrome.storage.local.set({'gptExporter.exportSettings':{
+      showToolbarButton:true,closeSelectionAfterExport:true,filenameFormat:'custom-title',customFilenamePrefix:'课程',
+      includeConversationLink:false,includeMessageTimestamp:true,includeTitleInNonPdf:false,
+      includeUserName:true,userName:'测试用户',dateFormat:'YYYY-MM-DD',timeFormat:'24h',
+      customizeRoleNames:true,roleNames:{user:'提问',assistant:'回答'},copyToClipboardAfterExport:true
+    }}));
+    const settingsPopup=await context.newPage();await settingsPopup.goto(base+'popup.html');
+    await worker.evaluate(id=>chrome.tabs.update(id,{active:true}),tab.id);
+    const secondReaderPromise=context.waitForEvent('page');await settingsPopup.evaluate(()=>document.getElementById('open').click());
+    const secondReader=await secondReaderPromise;secondReader.setDefaultTimeout(30000);await secondReader.waitForSelector('#message-list input');
+    let requestedFilename='', clipboardCopied=false;
+    secondReader.on('console',message=>{if(message.text().startsWith('fixture filename:'))requestedFilename=message.text().slice('fixture filename:'.length);if(message.text()==='fixture clipboard:ok')clipboardCopied=true;});
+    await secondReader.evaluate(()=>{const download=chrome.downloads.download.bind(chrome.downloads);chrome.downloads.download=options=>{console.log('fixture filename:'+options.filename);return download(options);};Object.defineProperty(navigator,'clipboard',{configurable:true,value:{async writeText(text){if(text.includes('测试用户')&&text.includes('## 提问'))console.log('fixture clipboard:ok');}}});});
+    const closePromise=secondReader.waitForEvent('close',{timeout:30000});
+    const configuredDownloadPromise=secondReader.waitForEvent('download',{timeout:30000});
+    await secondReader.locator('[data-format="markdown"]').click();
+    const configuredDownload=await configuredDownloadPromise;
+    const configuredText=fs.readFileSync(await configuredDownload.path(),'utf8');
+    await closePromise;
+    assert.match(requestedFilename,/^课程-/);
+    assert.equal(clipboardCopied,true,'configured non-PDF export copies the generated contents before closing');
+    assert.match(configuredText,/测试用户/);assert.match(configuredText,/## 提问/);assert.match(configuredText,/## 回答/);
+    assert.doesNotMatch(configuredText,/完整历史与富内容测试|https:\/\/chatgpt\.com\/c\//);
+    assert.match(configuredText,/2023\\?-11\\?-\d\d/);
+    checks.push('stored preferences apply to actual download and close the reader after completion');
+    await worker.evaluate(async()=>chrome.storage.local.remove('gptExporter.exportSettings'));
+    const shared=await collect('https://chatgpt.com/share/'+SID);assert.equal(shared.model.source.kind,'shared');assert.equal(shared.model.messages.length,21);await shared.page.close();
     checks.push('shared conversation API');
     const loaderPage=await context.newPage();
     await loaderPage.addInitScript(raw=>{window.__reactRouterContext={state:{loaderData:{'routes/share.$shareId.($action)':{serverResponse:{data:raw}}}}};},graph(SID));
     await loaderPage.goto('https://chatgpt.com/share/e/'+SID);await loaderPage.waitForSelector('#gpt-exporter-launcher');
     const loaderModel=await worker.evaluate(async url=>{const [tab]=await chrome.tabs.query({url});return chrome.tabs.sendMessage(tab.id,{type:'GPT_EXPORTER_COLLECT'});},loaderPage.url());
-    assert.equal(loaderModel.ok,true);assert.equal(loaderModel.conversation.source.kind,'shared');assert.equal(loaderModel.conversation.messages.length,19);await loaderPage.close();
+    assert.equal(loaderModel.ok,true);assert.equal(loaderModel.conversation.source.kind,'shared');assert.equal(loaderModel.conversation.messages.length,21);await loaderPage.close();
     checks.push('shared React Router loader snapshot');
     const temp=await context.newPage();await temp.goto('https://chatgpt.com/?temporary-chat=true');await temp.waitForSelector('#gpt-exporter-launcher');
     await temp.evaluate(async()=>{await (await fetch('/backend-api/f/conversation',{method:'POST',headers:{Accept:'text/event-stream'}})).text();});
     const temporary=await worker.evaluate(async()=>{const [tab]=await chrome.tabs.query({url:'https://chatgpt.com/?temporary-chat=true'});return chrome.tabs.sendMessage(tab.id,{type:'GPT_EXPORTER_COLLECT'});});
-    assert.equal(temporary.ok,true);assert.equal(temporary.conversation.source.kind,'temporary');assert.equal(temporary.conversation.messages.length,19);assert.equal(temporary.conversation.source.complete,true);
+    assert.equal(temporary.ok,true);assert.equal(temporary.conversation.source.kind,'temporary');assert.equal(temporary.conversation.messages.length,21);assert.equal(temporary.conversation.source.complete,true);
     checks.push('temporary SSE ID to complete conversation API');await temp.close();
     const partial=await collect('https://chatgpt.com/c/'+denied);assert.equal(partial.model.source.complete,false);assert.equal(partial.model.messages.length,1);await partial.page.close();
     checks.push('403 fallback visibly marked partial');

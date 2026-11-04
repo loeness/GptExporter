@@ -2,6 +2,7 @@
   'use strict';
   if (globalThis.__gptExporterContentLoaded) return;
   globalThis.__gptExporterContentLoaded = true;
+  const SETTINGS_KEY = 'gptExporter.exportSettings';
   const api = globalThis.GptExporter;
   let busy = false, closeTimer = 0;
 
@@ -70,6 +71,20 @@
   });
   const status = document.createElement('p'); status.className = 'status'; status.setAttribute('role','status'); status.setAttribute('aria-live','polite');
   menu.append(options); split.append(select,toggle,menu); shadow.append(style,split,status); document.documentElement.append(host);
+
+  function setToolbarVisibility(visible) { host.hidden = !visible; }
+  try {
+    chrome.storage.local.get(SETTINGS_KEY).then(result => {
+      const preferences = result?.[SETTINGS_KEY];
+      setToolbarVisibility(preferences?.showToolbarButton !== false);
+    }).catch(() => {});
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== 'local' || !Object.hasOwn(changes, SETTINGS_KEY)) return;
+      setToolbarVisibility(changes[SETTINGS_KEY].newValue?.showToolbarButton !== false);
+    });
+  } catch (_) {
+    // Keep the toolbar visible when extension storage is temporarily unavailable.
+  }
 
   function cancelClose() { clearTimeout(closeTimer); closeTimer = 0; }
   function closeMenu(restoreFocus = false) {

@@ -38,5 +38,5 @@ const regular = manifest.content_scripts.filter(script => script.world !== 'MAIN
 if (JSON.stringify(regular.flatMap(script => script.matches).sort())!==JSON.stringify(websites.sort())) throw new Error('Content hosts do not match the provider registry');
 const bridges = manifest.content_scripts.filter(script => script.world === 'MAIN');
 if (bridges.length !== 1 || JSON.stringify([...bridges[0].matches].sort())!==JSON.stringify(['https://chat.openai.com/*','https://chatgpt.com/*'])) throw new Error('Page bridge must remain limited to ChatGPT');
-if (JSON.stringify([...manifest.permissions].sort()) !== JSON.stringify(['activeTab', 'downloads', 'offscreen', 'scripting', 'storage'])) throw new Error('Unexpected permissions');
+if (JSON.stringify([...manifest.permissions].sort()) !== JSON.stringify(['activeTab', 'clipboardWrite', 'downloads', 'offscreen', 'scripting', 'storage'])) throw new Error('Unexpected permissions');
 console.log('Manifest resources, JavaScript syntax, local HTML references and CSP: OK');

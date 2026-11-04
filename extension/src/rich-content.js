@@ -263,7 +263,9 @@
     }
     const error = safeVisibleError(asset && asset.error);
     const name = asset && asset.name ? safeFilename(asset.name) : alt;
-    const label = `图片不可用${name ? `：${name}` : ''}${error ? `（${error}）` : ''}`;
+    const label = asset && asset.status === 'pending' && !error
+      ? `正在读取图片${name ? `：${name}` : ''}`
+      : `图片不可用${name ? `：${name}` : ''}${error ? `（${error}）` : ''}`;
     const fallback = textElement(document, 'span', 'ge-unavailable-image', label);
     placeholder.replaceWith(fallback);
   }
@@ -493,7 +495,7 @@
               const scale=Math.min(1,targetWidth/width,targetHeight/height);
               const bitmap=document.createElement('canvas');bitmap.width=targetWidth*2;bitmap.height=targetHeight*2;
               bitmap.getContext('2d').drawImage(image,(display?(targetWidth-width*scale)/2:0)*2,(targetHeight-height*scale),width*scale*2,height*scale*2);
-              return bitmap.toDataURL('image/png');
+              return {dataUrl:bitmap.toDataURL('image/png'),width:targetWidth,height:targetHeight};
             }
           }
         }
@@ -510,7 +512,7 @@
       });
       if (!canvas || typeof canvas.toDataURL !== 'function') return null;
       const data = canvas.toDataURL('image/png');
-      return isRasterDataUrl(data) ? data : null;
+      return isRasterDataUrl(data) ? {dataUrl:data,width:Math.round(canvas.width / 2),height:Math.round(canvas.height / 2)} : null;
     } catch (_) { return null; }
   }
 
@@ -566,14 +568,14 @@
     }
   }
 
-  function replaceWithSnapshotImage(node, dataUrl, alt) {
+  function replaceWithSnapshotImage(node, dataUrl, alt, fallbackSize) {
     const image = node.ownerDocument.createElement('img');
     image.src = dataUrl;
     image.alt = alt;
-    image.className = 'ge-snapshot-image';
+    image.className = 'ge-snapshot-image' + (node.getAttribute && node.getAttribute('data-ge-display') === 'false' ? ' ge-inline-math' : '');
     const rect = node.getBoundingClientRect ? node.getBoundingClientRect() : null;
-    const width = Math.round(Number(rect && rect.width) || Number(node.getAttribute && node.getAttribute('width')) || 0);
-    const height = Math.round(Number(rect && rect.height) || Number(node.getAttribute && node.getAttribute('height')) || 0);
+    const width = Math.round(Number(rect && rect.width) || Number(node.getAttribute && node.getAttribute('width')) || Number(fallbackSize && fallbackSize.width) || 0);
+    const height = Math.round(Number(rect && rect.height) || Number(node.getAttribute && node.getAttribute('height')) || Number(fallbackSize && fallbackSize.height) || 0);
     if (width > 0 && width <= 30000) image.setAttribute('width', String(width));
     if (height > 0 && height <= 30000) image.setAttribute('height', String(height));
     node.replaceWith(image);
@@ -662,8 +664,8 @@
     }
     try {
       for (const math of Array.from(clone.querySelectorAll('[data-ge-math="true"][data-ge-rendered="true"]'))) {
-        const data = await mathCanvas(math, document);
-        if (data) replaceWithSnapshotImage(math, data, imageAltFor(math));
+        const snapshot = await mathCanvas(math, document);
+        if (snapshot) replaceWithSnapshotImage(math, snapshot.dataUrl, imageAltFor(math), snapshot);
         else {
           const source = math.getAttribute('data-ge-tex') || math.textContent || '';
           math.replaceWith(textElement(document, 'code', 'ge-math-source-fallback', source));

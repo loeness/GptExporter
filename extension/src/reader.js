@@ -11,6 +11,7 @@
     selected: new Set(),
     query: '',
     preferences: { includeMetadata: true, theme: 'light' },
+    exportSettings: {},
     hasError: false,
     statusTimer: 0,
     branchId: '__all',
@@ -18,6 +19,8 @@
     renderError: null,
     renderSequence: 0,
     busy: false,
+    mediaTask: Promise.resolve(),
+    attemptedImages: new Set(),
     blobUrls: new Set()
   };
 
@@ -211,9 +214,9 @@
   function branchMessages() {
     if (!state.conversation) return [];
     const branch = state.conversation.branches?.find(item => item.id === state.branchId);
-    if (!branch) return state.conversation.messages;
+    if (!branch) return root.GptExporter.filterVisibleMessages(state.conversation.messages);
     const byId = new Map(state.conversation.messages.map(message => [message.id,message]));
-    return branch.messageIds.map(id => byId.get(id)).filter(Boolean);
+    return root.GptExporter.filterVisibleMessages(branch.messageIds.map(id => byId.get(id)).filter(Boolean));
   }
 
   function initializeBranches() {
@@ -221,7 +224,9 @@
     const branches = state.conversation.branches || [];
     for (const branch of branches) {
       const option = root.document.createElement('option'); option.value=branch.id;
-      option.textContent=`${branch.label} (${branch.messageIds.length} 条)`; list.append(option);
+      const byId = new Map(state.conversation.messages.map(message => [message.id, message]));
+      const visible = root.GptExporter.filterVisibleMessages(branch.messageIds.map(id => byId.get(id)).filter(Boolean));
+      option.textContent=`${branch.label} (${visible.length} 条)`; list.append(option);
     }
     const all = root.document.createElement('option'); all.value='__all';all.textContent='全部分支（共同消息仅一次）';list.append(all);
     state.branchId = branches.some(branch => branch.id === state.conversation.activeBranchId) ? state.conversation.activeBranchId : '__all';
@@ -311,7 +316,10 @@
 
     try {
       const output = root.GptExporter.renderHtmlFragment(currentConversation(), {
+        dateFormat: state.exportSettings.dateFormat, timeFormat: state.exportSettings.timeFormat,
         includeMetadata: els['include-metadata'].checked,
+        includeConversationLink: state.exportSettings.includeConversationLink !== false,
+        includeMessageTimestamp: state.exportSettings.includeMessageTimestamp === true,
         messages: selected
       });
       const stage=root.document.createElement('div');stage.innerHTML=output;
@@ -330,6 +338,7 @@
     const count = state.selected.size;
     els['selection-count'].textContent = `已选择 ${count} 条`;
     renderPreview();
+    preloadSelectedImages();
   }
 
   function applyTheme() {
@@ -345,11 +354,14 @@
   }
 
   async function hydrateSelectedAssets() {
+    await state.mediaTask;
     const ids=new Set(selectedMessages().map(message=>message.id));
     const explicitIds=new Set(selectedMessages().flatMap(message=>message.assetIds||[]));
     const assets=(state.conversation.assets||[]).filter(asset=>ids.has(asset.messageId)||explicitIds.has(asset.id));
     if (assets.length && root.GptExporter.loadConversationAssets) {
-      await root.GptExporter.loadConversationAssets({...state.conversation,assets},{onProgress:progress=>showStatus(`正在嵌入媒体 ${progress.completed}/${progress.total}：${progress.name}`,'info')});
+      const chosen = new Set(assets);
+      const initialBytes = (state.conversation.assets || []).filter(asset => !chosen.has(asset)).reduce((sum, asset) => sum + (asset.dataUrl?.length || 0) * .75, 0);
+      await root.GptExporter.loadConversationAssets({...state.conversation,assets},{initialBytes,onProgress:progress=>showStatus(`正在嵌入媒体 ${progress.completed}/${progress.total}：${progress.name}`,'info')});
       const failed=assets.filter(asset=>asset.status!=='ready');
       if (failed.length) showStatus(`${failed.length} 个媒体无法嵌入，文档中会保留缺失提示。`,'error');
     }
@@ -357,14 +369,62 @@
     if(state.renderError)throw new Error('富内容未能完成渲染，本次导出已停止：'+state.renderError.message);
   }
 
-  function downloadResult(result) {
+  function preloadSelectedImages() {
+    const model = state.conversation;
+    if (!model || !root.GptExporter.loadConversationAssets) return;
+    const messages = selectedMessages();
+    const ids = new Set(messages.map(message => message.id));
+    const referenced = new Set(messages.flatMap(message => message.assetIds || []));
+    const images = (model.assets || []).filter(asset => asset.kind === 'image' &&
+      (ids.has(asset.messageId) || referenced.has(asset.id)) && asset.status !== 'ready' &&
+      !state.attemptedImages.has(asset.id));
+    if (!images.length) return;
+    images.forEach(asset => state.attemptedImages.add(asset.id));
+    state.mediaTask = state.mediaTask.then(async () => {
+      if (state.conversation !== model) return;
+      showStatus(`正在读取 ${images.length} 张图片以显示预览…`, 'info');
+      const chosen = new Set(images);
+      const initialBytes = (model.assets || []).filter(asset => !chosen.has(asset)).reduce((sum, asset) => sum + (asset.dataUrl?.length || 0) * .75, 0);
+      await root.GptExporter.loadConversationAssets({...model, assets: images}, {
+        initialBytes,
+        onProgress: ({completed, total}) => {
+          if (state.conversation === model && (completed === 1 || completed % 5 === 0 || completed === total)) renderPreview();
+        }
+      });
+      if (state.conversation !== model) return;
+      renderPreview();
+      const missing = images.filter(asset => asset.status !== 'ready').length;
+      if (missing) showStatus(`${missing} 张图片无法读取；可保持原对话打开后点击“嵌入图片与附件”重试。`, 'error');
+    }).catch(error => {
+      if (state.conversation === model) showStatus('图片预览读取失败：' + (error.message || '请重试。'), 'error');
+    });
+  }
+
+  async function downloadResult(result) {
     const blob = new Blob([result.content], { type: result.mime });
     const href = root.URL.createObjectURL(blob);state.blobUrls.add(href);
-    const anchor = root.document.createElement('a');
-    const baseName = (els['conversation-title'].value || '对话导出')
-      .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '-').replace(/\s+/g, ' ').trim().slice(0, 100) || '对话导出';
-    anchor.href = href;anchor.download = `${baseName}.${result.extension}`;anchor.hidden = true;
-    root.document.body.append(anchor);anchor.click();anchor.remove();
+    const filename = root.GptExporter.exportSettings.filename(els['conversation-title'].value, result.extension, state.exportSettings);
+    if (state.exportSettings.closeSelectionAfterExport) {
+      if (!root.chrome?.downloads?.download || !root.chrome.downloads.onChanged) throw new Error('此浏览器无法确认下载完成，未自动关闭预览。');
+      const id = await root.chrome.downloads.download({url:href, filename, saveAs:false, conflictAction:'uniquify'});
+      await new Promise((resolve, reject) => {
+        let timer;
+        const finish = error => { root.clearTimeout(timer); root.chrome.downloads.onChanged.removeListener(listener); error ? reject(error) : resolve(); };
+        const inspect = item => {
+          const status = typeof item.state === 'string' ? item.state : item.state?.current;
+          if (status === 'complete') finish();
+          else if (status === 'interrupted' || item.error?.current) finish(new Error('下载中断，预览保持打开。'));
+        };
+        const listener = delta => { if (delta.id === id) inspect(delta); };
+        root.chrome.downloads.onChanged.addListener(listener);
+        timer = root.setTimeout(() => finish(new Error('等待下载完成超时，预览保持打开。')), 90000);
+        root.chrome.downloads.search({id}).then(items => { if (items.length) inspect(items[0]); }, finish);
+      });
+    } else {
+      const anchor = root.document.createElement('a');
+      anchor.href = href;anchor.download = filename;anchor.hidden = true;
+      root.document.body.append(anchor);anchor.click();anchor.remove();
+    }
     root.setTimeout(() => {root.URL.revokeObjectURL(href);state.blobUrls.delete(href);},30000);
   }
 
@@ -380,15 +440,25 @@
         snapshot=root.GptExporter.snapshotRichContent ? await root.GptExporter.snapshotRichContent(els['preview-content']) : els['preview-content'].cloneNode(true);
         renderedHtml=snapshot.innerHTML;
       }
-      const options={format,includeMetadata:els['include-metadata'].checked,messages,renderedHtml};
+      const options={...state.exportSettings,format,includeMetadata:els['include-metadata'].checked,messages,renderedHtml,
+        includeConversationLink:state.exportSettings.includeConversationLink !== false,
+        includeMessageTimestamp:state.exportSettings.includeMessageTimestamp === true};
       const result = format==='pdf' ? {
         content:await root.GptExporter.buildPdf({container:snapshot,conversation:currentConversation(),messages,
           includeMetadata:options.includeMetadata,pageSize:els['pdf-page-size'].value,orientation:els['pdf-orientation'].value}),
         mime:'application/pdf',extension:'pdf'
       } : root.GptExporter.serialize(currentConversation(),options);
-      downloadResult(result);
+      await downloadResult(result);
+      let clipboardError = '';
+      if (format !== 'pdf' && state.exportSettings.copyToClipboardAfterExport) {
+        try {
+          if (!root.navigator.clipboard?.writeText) throw new Error('浏览器未提供剪贴板接口');
+          await root.navigator.clipboard.writeText(String(result.content));
+        } catch (error) { clipboardError = error.message || '剪贴板写入失败'; }
+      }
       const failed=(state.conversation.assets||[]).filter(asset=>asset.status==='unavailable'&&messages.some(message=>message.id===asset.messageId));
-      showStatus(`已生成 ${result.extension.toUpperCase()}，包含所选 ${messages.length} 条消息${failed.length?`；${failed.length} 个媒体缺失，已保留提示`:''}。`,failed.length?'error':'success');
+      showStatus(`已生成 ${result.extension.toUpperCase()}，包含所选 ${messages.length} 条消息${failed.length?`；${failed.length} 个媒体缺失，已保留提示`:''}${clipboardError?`；复制失败：${clipboardError}`:''}。`,failed.length || clipboardError ?'error':'success');
+      if (state.exportSettings.closeSelectionAfterExport && !clipboardError) root.close();
     } finally {setBusy(false);}
   }
 
@@ -397,8 +467,11 @@
       const messages = selectedMessages();
       if (!messages.length) throw new Error('请先勾选至少一条消息。');
       const result = root.GptExporter.serialize(currentConversation(), {
+        ...state.exportSettings,
         format: 'markdown',
         includeMetadata: els['include-metadata'].checked,
+        includeConversationLink: state.exportSettings.includeConversationLink !== false,
+        includeMessageTimestamp: state.exportSettings.includeMessageTimestamp === true,
         messages
       });
       if (!root.navigator.clipboard || typeof root.navigator.clipboard.writeText !== 'function') {
@@ -414,7 +487,7 @@
   async function printDocument() {
     try {
       if (!selectedMessages().length) throw new Error('请先勾选至少一条消息。');
-      await state.renderPromise;root.print();
+      await hydrateSelectedAssets();root.print();
       showStatus('已打开打印对话框，可选择“保存为 PDF”。', 'info');
     } catch (error) {
       showStatus(error && error.message ? error.message : '无法打开打印对话框。', 'error');
@@ -509,6 +582,12 @@
     cacheElements();
     bindEvents();
     await loadPreferences();
+    state.exportSettings = await root.GptExporter.exportSettings.read();
+    if (root.chrome?.storage?.onChanged) root.chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local' || !changes[root.GptExporter.exportSettings.KEY]) return;
+      state.exportSettings = root.GptExporter.exportSettings.normalize(changes[root.GptExporter.exportSettings.KEY].newValue);
+      if (state.conversation) renderPreview();
+    });
     applyTheme();
     els['include-metadata'].checked = state.preferences.includeMetadata;
     try {

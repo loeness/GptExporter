@@ -32,6 +32,15 @@ function walk(value, visit) {
   Object.values(value).forEach((item) => walk(item, visit));
 }
 
+function definitionText(value) {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) return value.map(definitionText).join('');
+  if (!value || typeof value !== 'object') return '';
+  return ['text', 'stack', 'ul', 'ol', 'table', 'body']
+    .map((key) => definitionText(value[key]))
+    .join('');
+}
+
 test('builds a semantic PDF definition with CJK, blocks, images, layout, and page numbers', () => {
   const conversation = {
     title: '本地对话',
@@ -77,6 +86,7 @@ test('builds a semantic PDF definition with CJK, blocks, images, layout, and pag
   const nodes = [];
   walk(definition.content, (node) => nodes.push(node));
   assert.ok(nodes.some((node) => node.table && node.table.headerRows === 1));
+  assert.ok(nodes.some((node) => node.table && node.table.dontBreakRows === false));
   assert.ok(nodes.some((node) => node.ul && node.ul.length === 2));
   assert.ok(nodes.some((node) => node.link === 'https://example.com/'));
   const images = nodes.filter((node) => node.image === png);
@@ -86,6 +96,45 @@ test('builds a semantic PDF definition with CJK, blocks, images, layout, and pag
   assert.ok(images.every((image) => !('fit' in image) && image.alignment === 'center'));
   assert.ok(nodes.some((node) => node.style === 'codeBlock' && node.preserveLeadingSpaces === true));
   assert.ok(nodes.some((node) => node.style === 'documentTitle'));
+});
+
+test('aligns role headers and long user content while keeping long messages page-breakable', () => {
+  const longText = '跨页长文保留可搜索内容'.repeat(1800);
+  const messages = [
+    { id: 'assistant-1', role: 'assistant', text: 'Assistant reply' },
+    { id: 'user-1', role: 'user', text: longText },
+    { id: 'user-2', role: 'user', text: '后续用户补充' }
+  ];
+  const container = makeContainer(`
+    <article data-message-id="assistant-1" data-role="assistant"><h2><span class="message-avatar" aria-hidden="true"></span>Assistant</h2><p>左侧回答</p></article>
+    <article data-message-id="user-1" data-role="user"><h2><span class="message-avatar" aria-hidden="true"></span>User</h2><p>${longText}</p><table><tbody><tr><td>用户表格</td></tr></tbody></table></article>
+    <article data-message-id="user-2" data-role="user"><h2><span class="message-avatar" aria-hidden="true"></span>User</h2><p>后续用户补充</p></article>
+  `);
+  const definition = api.pdfDefinition({ container, conversation: {}, messages, includeMetadata: false });
+  const nodes = [];
+  walk(definition.content, (node) => nodes.push(node));
+  const assistantHeader = nodes.find((node) => node.style === 'roleHeaderAssistant');
+  const userHeader = nodes.find((node) => node.style === 'roleHeaderUser');
+  const repeatedUserHeader = nodes.find((node) => node.style === 'roleHeaderContinuation');
+  const userParagraph = nodes.find((node) => node.style === 'paragraph' && JSON.stringify(node).includes('跨页长文保留可搜索内容'));
+  const userTable = nodes.find((node) => node.table && node.table.body.some((row) => JSON.stringify(row).includes('用户表格')));
+  const avatars = nodes.filter((node) => Array.isArray(node.canvas));
+  const assistantAvatar = avatars.find((node) => node.canvas.some((shape) => shape.type === 'rect'));
+  const userAvatar = avatars.find((node) => node.canvas.length === 3 && node.canvas.every((shape) => shape.type === 'ellipse'));
+
+  assert.equal(assistantHeader.alignment, 'left');
+  assert.equal(userHeader.alignment, 'right');
+  assert.equal(repeatedUserHeader.alignment, 'right');
+  assert.equal(userParagraph.alignment, 'right');
+  assert.equal(userTable.table.body[0][0].alignment, 'right');
+  assert.equal(avatars.length, 3);
+  assert.ok(assistantAvatar);
+  assert.ok(userAvatar);
+  assert.ok(assistantAvatar.canvas.some((shape) => shape.type === 'line'));
+  assert.ok(userAvatar.canvas.every((shape) => shape.color === '#ffffff' || shape.color === '#617b8a'));
+  assert.ok(avatars[2].width < avatars[1].width);
+  assert.ok(definitionText(definition.content).replace(/\s/g, '').includes(longText));
+  assert.ok(nodes.every((node) => node.unbreakable !== true));
 });
 
 test('keeps nested list items in place and preserves ordered start and value numbering', () => {
@@ -143,6 +192,7 @@ test('keeps a short inline TeX image between its surrounding text and blocks a t
   const container = makeContainer(`
     <article data-message-id="selected">
       <p>行内数学<img alt="TeX: E=mc²" width="20" height="12" src="${png}">，显示公式：</p>
+      <p>后台公式<img class="ge-inline-math" alt="TeX: x" height="40" src="${png}">仍在行内</p>
       <p>复杂公式<img alt="TeX: large equation" height="40" src="${png}">后续说明</p>
     </article>
   `);
@@ -157,6 +207,11 @@ test('keeps a short inline TeX image between its surrounding text and blocks a t
   assert.equal(inlineCells[1].width, 15);
   assert.equal(inlineCells[1].valign, 'middle');
   assert.match(JSON.stringify(inlineCells[2]), /显示公式/);
+
+  const backgroundInline = definition.content.find(node => node?.layout === 'noBorders' && node.table && JSON.stringify(node.table).includes('后台公式'));
+  assert.ok(backgroundInline);
+  assert.ok(backgroundInline.table.body[0].some(cell => cell.image === png));
+  assert.match(JSON.stringify(backgroundInline.table), /仍在行内/);
 
   const tallFormula = definition.content.find((node) => node && node.image === png);
   assert.ok(tallFormula);
