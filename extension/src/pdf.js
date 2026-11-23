@@ -8,6 +8,10 @@
   const PAGE_WIDTH = { A4: 595.28, LETTER: 612 };
   const PAGE_HEIGHT = { A4: 841.89, LETTER: 792 };
   const MARGINS = [48, 46, 48, 46];
+  const JPEG_FRAME_MARKERS = new Set([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf]);
+  const MAX_RASTER_EDGE = 2400;
+  const MAX_RASTER_PIXELS = 4000000;
+  const MAX_SOURCE_PIXELS = 40000000;
   const DANGEROUS_TAGS = new Set([
     'script', 'style', 'iframe', 'object', 'embed', 'template', 'form', 'input',
     'button', 'textarea', 'select', 'option', 'link', 'meta', 'base'
@@ -312,32 +316,46 @@
 
   function imageDimensions(source) {
     if (typeof root.atob !== 'function') return null;
-    const encoded = source.dataUrl.slice(source.dataUrl.indexOf(',') + 1);
-    const prefixLength = Math.min(encoded.length - (encoded.length % 4), 350000);
-    let decoded;
-    try { decoded = root.atob(encoded.slice(0, prefixLength)); }
-    catch (_) { return null; }
-    const bytes = Uint8Array.from(decoded, (character) => character.charCodeAt(0));
-    const u16 = (offset) => (bytes[offset] << 8) | bytes[offset + 1];
-    const u32 = (offset) => ((bytes[offset] * 0x1000000) + (bytes[offset + 1] << 16) + (bytes[offset + 2] << 8) + bytes[offset + 3]) >>> 0;
-    if (source.mimeType === 'image/png' && bytes.length >= 24 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
-      return { width: u32(16), height: u32(20) };
-    }
-    if (source.mimeType === 'image/jpeg' && bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
-      const frameMarkers = new Set([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf]);
+    const dataUrl = source.dataUrl;
+    const start = dataUrl.indexOf(',') + 1;
+    try {
+      if (source.mimeType === 'image/png') {
+        const header = root.atob(dataUrl.slice(start, start + 32));
+        if (header.length < 24 || !header.startsWith('\x89PNG\r\n\x1a\n') || header.slice(12, 16) !== 'IHDR') return null;
+        const uint32 = (offset) => (
+          header.charCodeAt(offset) * 0x1000000 + (header.charCodeAt(offset + 1) << 16) +
+          (header.charCodeAt(offset + 2) << 8) + header.charCodeAt(offset + 3)
+        );
+        return { width: uint32(16), height: uint32(20) };
+      }
+      if (source.mimeType !== 'image/jpeg') return null;
+      const limit = Math.min(dataUrl.length - start, 350000);
+      let decodedLength = Math.min(344, limit);
+      let bytes = root.atob(dataUrl.slice(start, start + decodedLength));
+      if (!bytes.startsWith('\xff\xd8')) return null;
+      const contains = (end) => {
+        if (end <= bytes.length) return true;
+        const required = Math.ceil(end / 3) * 4;
+        if (required > limit) return false;
+        decodedLength = Math.min(limit, Math.max(required, decodedLength * 2));
+        bytes = root.atob(dataUrl.slice(start, start + decodedLength));
+        return end <= bytes.length;
+      };
+      const uint16 = (offset) => (bytes.charCodeAt(offset) << 8) | bytes.charCodeAt(offset + 1);
       let offset = 2;
-      while (offset + 8 < bytes.length) {
-        if (bytes[offset] !== 0xff) { offset += 1; continue; }
-        while (bytes[offset] === 0xff) offset += 1;
-        const marker = bytes[offset++];
-        if (marker === 0xd8 || marker === 0xd9 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
-        if (offset + 1 >= bytes.length) break;
-        const length = u16(offset);
-        if (length < 2 || offset + length > bytes.length) break;
-        if (frameMarkers.has(marker) && length >= 7) return { height: u16(offset + 3), width: u16(offset + 5) };
+      while (contains(offset + 2) && bytes.charCodeAt(offset) === 0xff) {
+        while (contains(offset + 1) && bytes.charCodeAt(offset) === 0xff) offset += 1;
+        const marker = bytes.charCodeAt(offset++);
+        if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+        if (marker === 0xd9 || marker === 0xda || !contains(offset + 2)) return null;
+        const length = uint16(offset);
+        if (length < 2) return null;
+        if (JPEG_FRAME_MARKERS.has(marker)) {
+          return length >= 7 && contains(offset + 7) ? { height: uint16(offset + 3), width: uint16(offset + 5) } : null;
+        }
         offset += length;
       }
-    }
+    } catch (_) { /* An invalid image is replaced with its alt text. */ }
     return null;
   }
 
@@ -351,8 +369,7 @@
     return Number.isFinite(pixels) && pixels > 0 && pixels <= 100000 ? pixels : null;
   }
 
-  function imageDisplaySize(image, source, maxWidth, maxHeight) {
-    const dimensions = imageDimensions(source);
+  function imageDisplaySize(image, dimensions, maxWidth, maxHeight) {
     if (!dimensions || !dimensions.width || !dimensions.height) return null;
     const nativeWidth = dimensions.width * 0.75;
     const nativeHeight = dimensions.height * 0.75;
@@ -368,14 +385,22 @@
     };
   }
 
-  function renderImage(image, maxWidth, maxHeight) {
-    const source = dataUrlInfo(image.getAttribute('src'), false);
-    if (!source || (source.mimeType !== 'image/png' && source.mimeType !== 'image/jpeg')) return imageFallback(image);
-    const size = imageDisplaySize(image, source, maxWidth, maxHeight);
+  function getImageInfo(value, cache) {
+    if (cache.has(value)) return cache.get(value);
+    const source = dataUrlInfo(value, false);
+    const info = source && { ...source, dimensions: imageDimensions(source) };
+    cache.set(value, info);
+    return info;
+  }
+
+  function renderImage(image, maxWidth, maxHeight, imageInfo, imageName) {
+    const source = imageInfo || null;
+    const size = imageDisplaySize(image, source && source.dimensions, maxWidth, maxHeight);
     if (!size) return imageFallback(image);
     return {
-      image: source.dataUrl,
+      image: imageName(source.dataUrl),
       width: size.width,
+      maxHeight,
       alignment: 'center',
       margin: [0, 5, 0, 9]
     };
@@ -419,7 +444,7 @@
     };
   }
 
-  function paragraphBlocks(paragraph, maxWidth, maxHeight) {
+  function paragraphBlocks(paragraph, maxWidth, maxHeight, imageInfo, imageName) {
     const output = [];
     let runs = [];
     let inlineParts = [];
@@ -467,22 +492,20 @@
       if (DANGEROUS_TAGS.has(tag) || tag === 'svg' || tag === 'math' || tag === 'canvas' || tag === 'video' || tag === 'audio') return;
       if (tag === 'img') {
         flushRuns();
-        const source = dataUrlInfo(node.getAttribute('src'), false);
-        const size = source && (source.mimeType === 'image/png' || source.mimeType === 'image/jpeg')
-          ? imageDisplaySize(node, source, maxWidth, maxHeight)
-          : null;
+        const source = imageInfo(node.getAttribute('src'));
+        const size = imageDisplaySize(node, source && source.dimensions, maxWidth, maxHeight);
         const explicitlyInline = node.classList && node.classList.contains('ge-inline-math');
         const isInlineMath = /^TeX:/.test(cleanText(node.getAttribute('alt') || '')) && size &&
           (size.height <= inlineMathMaxHeight || (explicitlyInline && size.height <= inlineMathMaxHeight * 2));
         if (isInlineMath) {
-          const definition = renderImage(node, maxWidth, maxHeight);
+          const definition = renderImage(node, maxWidth, maxHeight, source, imageName);
           if (explicitlyInline && size.height > inlineMathMaxHeight && definition.width) {
             definition.width = Math.max(0.75, Math.round(definition.width * inlineMathMaxHeight / size.height * 100) / 100);
           }
           inlineParts.push({ type: 'math', definition });
         } else {
           flushInlineParts();
-          output.push(renderImage(node, maxWidth, maxHeight));
+          output.push(renderImage(node, maxWidth, maxHeight, source, imageName));
         }
         return;
       }
@@ -499,7 +522,7 @@
     return output;
   }
 
-  function buildPdfDefinition(options) {
+  function buildPdfDefinition(options, imageCache = new Map(), useImageDictionary = false) {
     const settings = options || {};
     const conversation = settings.conversation && typeof settings.conversation === 'object' ? settings.conversation : {};
     const selectedMessages = Array.isArray(settings.messages) ? settings.messages : (Array.isArray(conversation.messages) ? conversation.messages : []);
@@ -516,6 +539,17 @@
     const width = pageWidth(requestedPageSize, orientation) - MARGINS[0] - MARGINS[2];
     const maxHeight = (orientation === 'landscape' ? PAGE_WIDTH[requestedPageSize] : PAGE_HEIGHT[requestedPageSize]) - MARGINS[1] - MARGINS[3] - 80;
     const attachments = collectAttachments(conversation, selectedIds);
+    const images = {};
+    const imageNames = new Map();
+    const imageInfo = (value) => getImageInfo(value, imageCache);
+    const imageName = (dataUrl) => {
+      if (!useImageDictionary) return dataUrl;
+      if (imageNames.has(dataUrl)) return imageNames.get(dataUrl);
+      const name = `gpt_exporter_image_${imageNames.size + 1}`;
+      imageNames.set(dataUrl, name);
+      images[name] = dataUrl;
+      return name;
+    };
     const content = [];
     let renderedArticleCount = 0;
     const articleElements = Array.from(container.querySelectorAll ? container.querySelectorAll('article') : []);
@@ -586,7 +620,7 @@
         const label = tag === 'math' ? textOf(node) : '';
         return [{ text: label ? `[未转换的公式：${label}]` : `[未转换的${tag === 'svg' ? '矢量图' : tag === 'math' ? '公式' : tag === 'canvas' ? '画布图像' : '媒体'}]`, style: 'resourceFallback', margin: [0, 3, 0, 7] }];
       }
-      if (tag === 'img') return [renderImage(node, width, maxHeight)];
+      if (tag === 'img') return [renderImage(node, width, maxHeight, imageInfo(node.getAttribute('src')), imageName)];
 
       if (tag === 'header') {
         if (!includeMetadata) return [];
@@ -636,7 +670,7 @@
         return [{ text: inlineText(node), style: isDocumentTitle ? 'documentTitle' : `heading${level}`, margin: [0, level === 1 ? 3 : 9, 0, level === 1 ? 9 : 4] }];
       }
       if (tag === 'p') {
-        return paragraphBlocks(node, width, maxHeight);
+        return paragraphBlocks(node, width, maxHeight, imageInfo, imageName);
       }
       if (tag === 'pre') {
         const source = node.querySelector && node.querySelector('code') ? node.querySelector('code') : node;
@@ -725,7 +759,7 @@
         if (visible) {
           const wrapper = parent.ownerDocument.createElement('span');
           inlineNodes.forEach((node) => wrapper.appendChild(node.cloneNode(true)));
-          output.push(...paragraphBlocks(wrapper, width, maxHeight));
+          output.push(...paragraphBlocks(wrapper, width, maxHeight, imageInfo, imageName));
         }
         inlineNodes = [];
       };
@@ -752,13 +786,12 @@
     }
     content.push(...renderFlowChildren(container, { listDepth: 0 }));
 
-    const articleIdsInMessages = selectedMessages.map((message) => String(message && message.id == null ? '' : message.id));
     if (!renderedArticleCount && !articleElements.length) {
       const fallbackText = textOf(container).trim();
       if (fallbackText) content.push({ text: fallbackText, style: 'paragraph' });
     }
     for (const [messageId, items] of attachments.byMessage) {
-      if (articleIdsInMessages.includes(messageId) && !articleIds.has(messageId)) content.push(...attachmentContent(items));
+      if (selectedIds.has(messageId) && !articleIds.has(messageId)) content.push(...attachmentContent(items));
     }
     if (!content.length || (!renderedArticleCount && !textOf(container).trim() && !Object.keys(attachments.files).length)) {
       throw new TypeError('PDF 内容为空。请确认所选消息已完成渲染后重试。');
@@ -803,42 +836,82 @@
         margin: [0, 12, 0, 0]
       })
     };
+    if (imageNames.size) definition.images = images;
     if (Object.keys(attachments.files).length) definition.files = attachments.files;
     return definition;
   }
 
-  function imageDataToPng(dataUrl) {
+  function rasterNeedsResize(width, height) {
+    return Math.max(width, height) > MAX_RASTER_EDGE || width * height > MAX_RASTER_PIXELS;
+  }
+
+  function hasRasterEnd(source) {
+    try {
+      const payloadStart = source.dataUrl.indexOf(',') + 1;
+      if (source.mimeType === 'image/png') {
+        return root.atob(source.dataUrl.slice(Math.max(payloadStart, source.dataUrl.length - 32))).includes('\0\0\0\0IEND\xaeB`\x82');
+      }
+      const tail = root.atob(source.dataUrl.slice(Math.max(payloadStart, source.dataUrl.length - 128)));
+      return tail.includes('\xff\xd9');
+    } catch (_) { return false; }
+  }
+
+  function rasterizePdfImage(source) {
     if (!root.Image || !root.document || !root.document.createElement) return Promise.resolve(null);
     return new Promise((resolve) => {
       let image;
       try { image = new root.Image(); } catch (_) { resolve(null); return; }
+      const timeout = root.setTimeout(() => finish(null), 10000);
+      function finish(result) {
+        root.clearTimeout(timeout);
+        image.onload = null;
+        image.onerror = null;
+        image.removeAttribute('src');
+        resolve(result);
+      }
       image.onload = () => {
+        let canvas;
         try {
-          const canvas = root.document.createElement('canvas');
-          canvas.width = image.naturalWidth || image.width;
-          canvas.height = image.naturalHeight || image.height;
-          if (!canvas.width || !canvas.height || canvas.width * canvas.height > 40000000) { resolve(null); return; }
+          const width = image.naturalWidth;
+          const height = image.naturalHeight;
+          if (!width || !height || width * height > MAX_SOURCE_PIXELS) { finish(null); return; }
+          const scale = Math.min(1, MAX_RASTER_EDGE / Math.max(width, height), Math.sqrt(MAX_RASTER_PIXELS / (width * height)));
+          canvas = root.document.createElement('canvas');
+          canvas.width = Math.max(1, Math.floor(width * scale));
+          canvas.height = Math.max(1, Math.floor(height * scale));
           const context = canvas.getContext('2d');
-          if (!context) { resolve(null); return; }
-          context.drawImage(image, 0, 0);
-          const output = canvas.toDataURL('image/png');
-          resolve(dataUrlInfo(output, false) ? output : null);
-        } catch (_) { resolve(null); }
+          if (!context) { finish(null); return; }
+          context.drawImage(image, 0, 0, canvas.width, canvas.height);
+          const mimeType = source.mimeType === 'image/jpeg' ? 'image/jpeg' : 'image/png';
+          const output = canvas.toDataURL(mimeType, 0.88);
+          finish(output.startsWith(`data:${mimeType};base64,`) ? output : null);
+        } catch (_) { finish(null); }
+        finally { if (canvas) { canvas.width = 0; canvas.height = 0; } }
       };
-      image.onerror = () => resolve(null);
-      image.src = dataUrl;
+      image.onerror = () => finish(null);
+      try { image.src = source.dataUrl; }
+      catch (_) { finish(null); }
     });
   }
 
-  async function normalizeImages(container) {
+  async function normalizeImages(container, imageCache) {
     const images = Array.from(container.querySelectorAll ? container.querySelectorAll('img') : []);
+    const conversions = new Map();
     for (const image of images) {
-      const source = dataUrlInfo(image.getAttribute('src'), false);
-      if (!source || source.mimeType === 'image/png' || source.mimeType === 'image/jpeg') continue;
-      const png = await imageDataToPng(source.dataUrl);
-      if (png) image.setAttribute('src', png);
+      const source = getImageInfo(image.getAttribute('src'), imageCache);
+      if (!source) continue;
+      const dimensions = source.dimensions;
+      if (dimensions && (!dimensions.width || !dimensions.height || dimensions.width * dimensions.height > MAX_SOURCE_PIXELS)) {
+        image.removeAttribute('src');
+        continue;
+      }
+      if (dimensions && !rasterNeedsResize(dimensions.width, dimensions.height) && hasRasterEnd(source)) continue;
+      if (!conversions.has(source.dataUrl)) conversions.set(source.dataUrl, await rasterizePdfImage(source));
+      const output = conversions.get(source.dataUrl);
+      if (output) image.setAttribute('src', output);
       else image.removeAttribute('src');
     }
+    for (const original of conversions.keys()) imageCache.delete(original);
   }
 
   function getLocalFontUrl() {
@@ -902,11 +975,13 @@
     const pdfMake = vendors && vendors.pdfMake;
     if (!pdfMake || typeof pdfMake.createPdf !== 'function') throw new Error('本地 PDF 生成组件不可用，请重新加载扩展后重试。');
     const settings = Object.assign({}, options || {});
+    const imageCache = new Map();
     if (settings.container && typeof settings.container.cloneNode === 'function') {
-      settings.container = settings.container.cloneNode(true);
-      await normalizeImages(settings.container);
+      if (settings.consumeContainer !== true) settings.container = settings.container.cloneNode(true);
+      await normalizeImages(settings.container, imageCache);
     }
-    const definition = buildPdfDefinition(settings);
+    const definition = buildPdfDefinition(settings, imageCache, true);
+    imageCache.clear();
     await ensureFont(pdfMake);
     let pdf;
     try { pdf = pdfMake.createPdf(definition); }
@@ -920,6 +995,6 @@
     throw new Error('PDF 生成器返回了无效的文件数据。');
   }
 
-  api.pdfDefinition = buildPdfDefinition;
+  api.pdfDefinition = (options) => buildPdfDefinition(options);
   api.buildPdf = buildPdf;
 })(globalThis);

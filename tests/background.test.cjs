@@ -139,6 +139,20 @@ test('quick export rejects empty roles, invalid options and untrusted callers be
   assert.equal((await env.send({type:'GPT_EXPORTER_QUICK',conversation:model(),preset:'all'},{id:'test-id',url:'https://evil.invalid/'})).ok,false);
   assert.equal(env.renders.length,0);assert.equal(env.downloads.length,0);assert.equal(env.documents.created,0);
 });
+test('quick export measures the selected role and works while the preview cache is full', async () => {
+  const existingKey = 'export:existing';
+  const records = {[existingKey]: {createdAt: Date.now(), text: 'x'.repeat(9 * 1024 * 1024 - 1024)}};
+  const env = setup({records});
+  const input = model();
+  input.messages[0].text = 'preview '.repeat(300);
+  assert.match((await env.send({type:'GPT_EXPORTER_OPEN',conversation:input})).error, /预览缓存已满/);
+
+  input.messages.push({id:'2',role:'assistant',markdown:'Large answer',text:'x'.repeat(8 * 1024 * 1024),html:'<p>Large answer</p>'});
+  const result = await env.send({type:'GPT_EXPORTER_QUICK',conversation:input,preset:'questions'});
+  assert.equal(result.ok, true);
+  assert.deepEqual(env.renders[0].conversation.messages.map(message => message.id), ['1']);
+  assert.deepEqual(Object.keys(env.records), [existingKey]);
+});
 test('quick export cleans temporary state after renderer, download and interruption failures',async()=>{
   for(const options of [{failRender:true},{failDownload:true},{interrupted:true}]){
     const env=setup(options);const result=await env.send({type:'GPT_EXPORTER_QUICK',conversation:model(),preset:'all'});

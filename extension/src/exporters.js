@@ -239,17 +239,24 @@
     return rows;
   }
 
-  function branchLabelsForMessage(conversation, message) {
+  function branchLabelsByMessage(conversation, messages) {
+    const byMessage = new Map();
     const branches = Array.isArray(conversation && conversation.branches) ? conversation.branches : [];
     const selection = conversation && conversation.selection;
-    if (!selection || selection.branchId !== '__all' || branches.length < 2) return [];
-    const labels = [];
+    if (!selection || selection.branchId !== '__all' || branches.length < 2) return byMessage;
+    const selected = new Set(messages.map(message => message.id));
     for (const branch of branches) {
-      if (!branch || !Array.isArray(branch.messageIds) || !branch.messageIds.includes(message.id)) continue;
+      if (!branch || !Array.isArray(branch.messageIds)) continue;
       const label = redactMetadataText(String(branch.label || branch.id || '')).replace(/\s+/g, ' ').trim();
-      if (label && !labels.includes(label)) labels.push(label);
+      if (!label) continue;
+      for (const id of branch.messageIds) {
+        if (!selected.has(id)) continue;
+        if (!byMessage.has(id)) byMessage.set(id, new Set());
+        byMessage.get(id).add(label);
+      }
     }
-    return labels;
+    for (const [id, labels] of byMessage) byMessage.set(id, [...labels]);
+    return byMessage;
   }
 
   function markdownInlineText(value) {
@@ -281,6 +288,7 @@
 
   function markdownOutput(conversation, messages, settings) {
     const sections = [];
+    const branchLabels = branchLabelsByMessage(conversation, messages);
     if (settings.includeMetadata) {
       const meta = metadataRows(conversation, settings);
       const title = settings.includeTitleInNonPdf && conversation.title ? `# ${redactMetadataText(conversation.title)}` : '';
@@ -292,7 +300,7 @@
       if (warnings.length) sections.push('> 提示：' + warnings.map(redactMetadataText).join('；'));
     }
     for (const message of messages) {
-      const branches = branchLabelsForMessage(conversation, message);
+      const branches = branchLabels.get(message.id) || [];
       const note = branches.length ? '> 所属分支：' + branches.map(markdownInlineText).join('、') + '\n\n' : '';
       const timestamp = settings.includeMessageTimestamp ? messageTimestamp(message, settings) : '';
       const heading = '## ' + markdownInlineText(roleLabel(message, settings)) + (timestamp ? ' · ' + markdownInlineText(timestamp) : '');
@@ -303,6 +311,7 @@
 
   function textOutput(conversation, messages, settings) {
     const sections = [];
+    const branchLabels = branchLabelsByMessage(conversation, messages);
     if (settings.includeMetadata) {
       const meta = metadataRows(conversation, settings).filter(([label]) => label !== '标题');
       if (meta.length) sections.push(meta.map(([label, value]) => `${label}：${value}`).join('\n'));
@@ -311,7 +320,7 @@
       if (warnings.length) sections.push(`提示：${warnings.map(redactMetadataText).join('；')}`);
     }
     for (const message of messages) {
-      const branches = branchLabelsForMessage(conversation, message);
+      const branches = branchLabels.get(message.id) || [];
       const note = branches.length ? '所属分支：' + branches.join('、') + '\n' : '';
       const timestamp = settings.includeMessageTimestamp ? messageTimestamp(message, settings) : '';
       sections.push(('[' + roleLabel(message, settings) + ']' + (timestamp ? ' ' + timestamp : '') + '\n' + note + messageBody(message, 'text')).trim());
@@ -384,16 +393,19 @@
     }
     const rendered = renderedArticles(renderedHtml, messages, settings);
     if (rendered != null) parts.push(rendered);
-    else for (const message of messages) {
-      const generated = typeof api.richBodyHtml === 'function'
-        ? api.richBodyHtml(message)
-        : (message.html || escapeHtml(messageBody(message, 'text')).replace(/\n/g, '<br>'));
-      const body = sanitizeHtml(generated);
-      const branches = branchLabelsForMessage(conversation, message);
-      const notice = branches.length ? `<p class="branch-affiliations"><small>所属分支：${branches.map(escapeHtml).join('、')}</small></p>` : '';
-      const timestamp = settings.includeMessageTimestamp ? messageTimestamp(message, settings) : '';
-      const time = timestamp ? `<time datetime="${escapeHtml(message.createTime || timestamp)}">${escapeHtml(timestamp)}</time>` : '';
-      parts.push(`<article data-message-id="${escapeHtml(message.id)}" data-role="${escapeHtml(message.role)}"><h2><span class="message-avatar" aria-hidden="true"></span>${escapeHtml(roleLabel(message, settings))}${time ? ` ${time}` : ''}</h2>${notice}<div class="message-body">${body}</div></article>`);
+    else {
+      const branchLabels = branchLabelsByMessage(conversation, messages);
+      for (const message of messages) {
+        const generated = typeof api.richBodyHtml === 'function'
+          ? api.richBodyHtml(message)
+          : (message.html || escapeHtml(messageBody(message, 'text')).replace(/\n/g, '<br>'));
+        const body = sanitizeHtml(generated);
+        const branches = branchLabels.get(message.id) || [];
+        const notice = branches.length ? `<p class="branch-affiliations"><small>所属分支：${branches.map(escapeHtml).join('、')}</small></p>` : '';
+        const timestamp = settings.includeMessageTimestamp ? messageTimestamp(message, settings) : '';
+        const time = timestamp ? `<time datetime="${escapeHtml(message.createTime || timestamp)}">${escapeHtml(timestamp)}</time>` : '';
+        parts.push(`<article data-message-id="${escapeHtml(message.id)}" data-role="${escapeHtml(message.role)}"><h2><span class="message-avatar" aria-hidden="true"></span>${escapeHtml(roleLabel(message, settings))}${time ? ` ${time}` : ''}</h2>${notice}<div class="message-body">${body}</div></article>`);
+      }
     }
     return parts.join('\n');
   }

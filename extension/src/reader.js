@@ -15,11 +15,14 @@
     hasError: false,
     statusTimer: 0,
     branchId: '__all',
+    visibleMessages: [],
+    visibleById: new Map(),
     renderPromise: Promise.resolve(),
     renderError: null,
     renderSequence: 0,
     busy: false,
-    mediaTask: Promise.resolve(),
+    mediaTask: null,
+    selectedMedia: new Set(),
     attemptedImages: new Set(),
     blobUrls: new Set()
   };
@@ -214,19 +217,18 @@
   function branchMessages() {
     if (!state.conversation) return [];
     const branch = state.conversation.branches?.find(item => item.id === state.branchId);
-    if (!branch) return root.GptExporter.filterVisibleMessages(state.conversation.messages);
-    const byId = new Map(state.conversation.messages.map(message => [message.id,message]));
-    return root.GptExporter.filterVisibleMessages(branch.messageIds.map(id => byId.get(id)).filter(Boolean));
+    return branch ? branch.messageIds.map(id => state.visibleById.get(id)).filter(Boolean) : state.visibleMessages;
   }
 
   function initializeBranches() {
     const list = els['branch-select']; list.replaceChildren();
     const branches = state.conversation.branches || [];
+    state.visibleMessages = root.GptExporter.filterVisibleMessages(state.conversation.messages);
+    state.visibleById = new Map(state.visibleMessages.map(message => [message.id, message]));
     for (const branch of branches) {
       const option = root.document.createElement('option'); option.value=branch.id;
-      const byId = new Map(state.conversation.messages.map(message => [message.id, message]));
-      const visible = root.GptExporter.filterVisibleMessages(branch.messageIds.map(id => byId.get(id)).filter(Boolean));
-      option.textContent=`${branch.label} (${visible.length} 条)`; list.append(option);
+      const visibleCount = branch.messageIds.reduce((count, id) => count + Number(state.visibleById.has(id)), 0);
+      option.textContent=`${branch.label} (${visibleCount} 条)`; list.append(option);
     }
     const all = root.document.createElement('option'); all.value='__all';all.textContent='全部分支（共同消息仅一次）';list.append(all);
     state.branchId = branches.some(branch => branch.id === state.conversation.activeBranchId) ? state.conversation.activeBranchId : '__all';
@@ -249,18 +251,18 @@
   }
 
   function shortText(message) {
-    const text = String(message.text || message.markdown || '').replace(/\s+/g, ' ').trim();
+    const text = String(message.text || message.markdown || '').trimStart().slice(0, 240).replace(/\s+/g, ' ').trim();
     return text || '（此消息没有可预览的文字）';
   }
 
   function renderList() {
     const list = els['message-list'];
-    list.replaceChildren();
+    const fragment = root.document.createDocumentFragment();
+    const messages = branchMessages();
     const query = state.query.trim().toLocaleLowerCase();
     let visibleCount = 0;
-    branchMessages().forEach((message, index) => {
-      const searchable = `${ROLE_LABELS[message.role]} ${message.text} ${message.markdown}`.toLocaleLowerCase();
-      if (query && !searchable.includes(query)) return;
+    messages.forEach((message, index) => {
+      if (query && !`${ROLE_LABELS[message.role]} ${message.text} ${message.markdown}`.toLocaleLowerCase().includes(query)) return;
       visibleCount += 1;
 
       const item = root.document.createElement('li');
@@ -294,11 +296,12 @@
       body.append(top, snippet);
       label.append(checkbox, body);
       item.append(label);
-      list.append(item);
+      fragment.append(item);
     });
+    list.replaceChildren(fragment);
     els['list-empty'].hidden = visibleCount > 0;
     els['list-empty'].textContent = '没有匹配的消息';
-    els['message-total'].textContent = `${branchMessages().length} 条`;
+    els['message-total'].textContent = `${messages.length} 条`;
   }
 
   function renderPreview() {
@@ -337,6 +340,7 @@
   function renderSelection() {
     const count = state.selected.size;
     els['selection-count'].textContent = `已选择 ${count} 条`;
+    state.selectedMedia = new Set(selectedAssets(selectedMessages()));
     renderPreview();
     preloadSelectedImages();
   }
@@ -353,50 +357,73 @@
       .forEach(element => { element.disabled=value || (element.id==='load-media'&&!state.conversation?.assets?.length); });
   }
 
-  async function hydrateSelectedAssets() {
-    await state.mediaTask;
-    const ids=new Set(selectedMessages().map(message=>message.id));
-    const explicitIds=new Set(selectedMessages().flatMap(message=>message.assetIds||[]));
-    const assets=(state.conversation.assets||[]).filter(asset=>ids.has(asset.messageId)||explicitIds.has(asset.id));
-    if (assets.length && root.GptExporter.loadConversationAssets) {
-      const chosen = new Set(assets);
-      const initialBytes = (state.conversation.assets || []).filter(asset => !chosen.has(asset)).reduce((sum, asset) => sum + (asset.dataUrl?.length || 0) * .75, 0);
-      await root.GptExporter.loadConversationAssets({...state.conversation,assets},{initialBytes,onProgress:progress=>showStatus(`正在嵌入媒体 ${progress.completed}/${progress.total}：${progress.name}`,'info')});
-      const failed=assets.filter(asset=>asset.status!=='ready');
-      if (failed.length) showStatus(`${failed.length} 个媒体无法嵌入，文档中会保留缺失提示。`,'error');
+  function selectedAssets(messages) {
+    const ids = new Set(messages.map(message => message.id));
+    const referenced = new Set(messages.flatMap(message => message.assetIds || []));
+    return (state.conversation?.assets || []).filter(asset => ids.has(asset.messageId) || referenced.has(asset.id));
+  }
+
+  async function loadMedia(model, assets, shouldLoad) {
+    if (!assets.length || !root.GptExporter.loadConversationAssets) return;
+    const changed = new Set();
+    let pendingRefresh = 0;
+    const flush = () => {
+      root.clearTimeout(pendingRefresh);
+      pendingRefresh = 0;
+      if (state.conversation === model && changed.size) {
+        root.GptExporter.refreshRichAssets(els['preview-content'], model, [...changed]);
+      }
+      changed.clear();
+    };
+    try {
+      await root.GptExporter.loadConversationAssets({...model, assets}, {
+        cacheAssets: model.assets, shouldLoad,
+        onProgress: ({completed, total, asset}) => {
+          if (asset) changed.add(asset);
+          if (!pendingRefresh) pendingRefresh = root.setTimeout(flush, 100);
+          if (state.conversation === model && (completed === 1 || completed % 4 === 0 || completed === total)) {
+            showStatus(`正在读取媒体 ${completed}/${total}…`, 'info');
+          }
+        }
+      });
+    } finally {
+      flush();
     }
-    renderPreview();await state.renderPromise;
-    if(state.renderError)throw new Error('富内容未能完成渲染，本次导出已停止：'+state.renderError.message);
+  }
+
+  async function hydrateSelectedAssets({retryImages = false} = {}) {
+    await state.mediaTask;
+    const assets = [...state.selectedMedia];
+    const missing = assets.filter(asset => asset.status !== 'ready' &&
+      (asset.kind !== 'image' || retryImages || !state.attemptedImages.has(asset.id)));
+    await loadMedia(state.conversation, missing);
+    for (const asset of missing) if (asset.kind === 'image') state.attemptedImages.add(asset.id);
+    await state.renderPromise;
+    if (state.renderError) throw new Error('富内容未能完成渲染，本次导出已停止：' + state.renderError.message);
+    return assets.filter(asset => asset.status !== 'ready').length;
   }
 
   function preloadSelectedImages() {
     const model = state.conversation;
-    if (!model || !root.GptExporter.loadConversationAssets) return;
-    const messages = selectedMessages();
-    const ids = new Set(messages.map(message => message.id));
-    const referenced = new Set(messages.flatMap(message => message.assetIds || []));
-    const images = (model.assets || []).filter(asset => asset.kind === 'image' &&
-      (ids.has(asset.messageId) || referenced.has(asset.id)) && asset.status !== 'ready' &&
-      !state.attemptedImages.has(asset.id));
+    if (!model || state.busy || state.mediaTask || !root.GptExporter.loadConversationAssets) return;
+    const selection = state.selectedMedia;
+    const images = [...selection].filter(asset => asset.kind === 'image' &&
+      asset.status !== 'ready' && !state.attemptedImages.has(asset.id));
     if (!images.length) return;
-    images.forEach(asset => state.attemptedImages.add(asset.id));
-    state.mediaTask = state.mediaTask.then(async () => {
-      if (state.conversation !== model) return;
-      showStatus(`正在读取 ${images.length} 张图片以显示预览…`, 'info');
-      const chosen = new Set(images);
-      const initialBytes = (model.assets || []).filter(asset => !chosen.has(asset)).reduce((sum, asset) => sum + (asset.dataUrl?.length || 0) * .75, 0);
-      await root.GptExporter.loadConversationAssets({...model, assets: images}, {
-        initialBytes,
-        onProgress: ({completed, total}) => {
-          if (state.conversation === model && (completed === 1 || completed % 5 === 0 || completed === total)) renderPreview();
-        }
-      });
-      if (state.conversation !== model) return;
-      renderPreview();
-      const missing = images.filter(asset => asset.status !== 'ready').length;
+    showStatus(`正在读取 ${images.length} 张图片以显示预览…`, 'info');
+    state.mediaTask = loadMedia(model, images, asset => {
+      if (state.conversation !== model || !state.selectedMedia.has(asset)) return false;
+      state.attemptedImages.add(asset.id);
+      return true;
+    }).then(() => {
+      if (state.conversation !== model || state.busy) return;
+      const missing = images.filter(asset => state.selectedMedia.has(asset) && asset.status !== 'ready').length;
       if (missing) showStatus(`${missing} 张图片无法读取；可保持原对话打开后点击“嵌入图片与附件”重试。`, 'error');
     }).catch(error => {
       if (state.conversation === model) showStatus('图片预览读取失败：' + (error.message || '请重试。'), 'error');
+    }).finally(() => {
+      state.mediaTask = null;
+      if (state.conversation === model && selection !== state.selectedMedia) preloadSelectedImages();
     });
   }
 
@@ -434,17 +461,19 @@
     if (!messages.length) throw new Error('请先勾选至少一条消息。');
     setBusy(true);
     try {
-      let renderedHtml, snapshot;
+      let renderedHtml, snapshot, failed = 0;
       if (format==='pdf'||format==='html') {
-        showStatus('正在准备本地文档与媒体…','info');await hydrateSelectedAssets();
+        showStatus('正在准备本地文档与媒体…','info');
+        failed = await hydrateSelectedAssets();
+        showStatus('正在渲染导出文档…', 'info');
         snapshot=root.GptExporter.snapshotRichContent ? await root.GptExporter.snapshotRichContent(els['preview-content']) : els['preview-content'].cloneNode(true);
-        renderedHtml=snapshot.innerHTML;
+        if (format === 'html') renderedHtml = snapshot.innerHTML;
       }
       const options={...state.exportSettings,format,includeMetadata:els['include-metadata'].checked,messages,renderedHtml,
         includeConversationLink:state.exportSettings.includeConversationLink !== false,
         includeMessageTimestamp:state.exportSettings.includeMessageTimestamp === true};
       const result = format==='pdf' ? {
-        content:await root.GptExporter.buildPdf({container:snapshot,conversation:currentConversation(),messages,
+        content:await root.GptExporter.buildPdf({container:snapshot,consumeContainer:true,conversation:currentConversation(),messages,
           includeMetadata:options.includeMetadata,pageSize:els['pdf-page-size'].value,orientation:els['pdf-orientation'].value}),
         mime:'application/pdf',extension:'pdf'
       } : root.GptExporter.serialize(currentConversation(),options);
@@ -456,10 +485,9 @@
           await root.navigator.clipboard.writeText(String(result.content));
         } catch (error) { clipboardError = error.message || '剪贴板写入失败'; }
       }
-      const failed=(state.conversation.assets||[]).filter(asset=>asset.status==='unavailable'&&messages.some(message=>message.id===asset.messageId));
-      showStatus(`已生成 ${result.extension.toUpperCase()}，包含所选 ${messages.length} 条消息${failed.length?`；${failed.length} 个媒体缺失，已保留提示`:''}${clipboardError?`；复制失败：${clipboardError}`:''}。`,failed.length || clipboardError ?'error':'success');
+      showStatus(`已生成 ${result.extension.toUpperCase()}，包含所选 ${messages.length} 条消息${failed?`；${failed} 个媒体缺失，已保留提示`:''}${clipboardError?`；复制失败：${clipboardError}`:''}。`,failed || clipboardError ?'error':'success');
       if (state.exportSettings.closeSelectionAfterExport && !clipboardError) root.close();
-    } finally {setBusy(false);}
+    } finally {setBusy(false);preloadSelectedImages();}
   }
 
   async function copyMarkdown() {
@@ -485,18 +513,23 @@
   }
 
   async function printDocument() {
+    if (state.busy) return;
     try {
       if (!selectedMessages().length) throw new Error('请先勾选至少一条消息。');
+      setBusy(true);
       await hydrateSelectedAssets();root.print();
       showStatus('已打开打印对话框，可选择“保存为 PDF”。', 'info');
     } catch (error) {
       showStatus(error && error.message ? error.message : '无法打开打印对话框。', 'error');
-    }
+    } finally { setBusy(false); }
   }
 
   async function clearCurrentData() {
     const key = state.storageKey;
     state.conversation = null;
+    state.visibleMessages = [];
+    state.visibleById.clear();
+    state.selectedMedia.clear();
     state.renderSequence++;
     for (const href of state.blobUrls) root.URL.revokeObjectURL(href);
     state.blobUrls.clear();
@@ -528,7 +561,10 @@
     });
     els['load-media'].addEventListener('click',async()=>{
       if(state.busy||!state.conversation)return;setBusy(true);
-      try{await hydrateSelectedAssets();showStatus('媒体读取完成。不可用的文件已在预览中标出。');}
+      try {
+        const missing = await hydrateSelectedAssets({retryImages: true});
+        showStatus(missing ? `${missing} 个媒体未能嵌入，已在预览中标出。` : '媒体读取完成。', missing ? 'error' : 'success');
+      }
       catch(error){showStatus(error.message,'error');}finally{setBusy(false);}
     });
     els['message-search'].addEventListener('input', () => {

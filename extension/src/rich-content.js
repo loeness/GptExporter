@@ -9,6 +9,8 @@
   ]);
   let idCounter = 0;
   const initializedMermaid = new WeakSet();
+  const imageReferences = new WeakMap();
+  const attachmentSections = new WeakMap();
 
   function escapeHtml(value) {
     return String(value == null ? '' : value)
@@ -223,51 +225,56 @@
     return element;
   }
 
-  function messageAssets(conversation, message) {
-    const assets = Array.isArray(conversation && conversation.assets) ? conversation.assets : [];
-    const messageId = String(message && message.id == null ? '' : message.id);
-    return assets.filter((asset) => asset && String(asset.messageId == null ? '' : asset.messageId) === messageId);
-  }
-
   function assetUrlPath(value) {
     const url = allowedMediaUrl(value);
     return url ? `${url.origin}${url.pathname}` : '';
   }
 
-  function findImageAsset(_message, assets, placeholder) {
-    const assetId = safeAssetId(placeholder.getAttribute('data-ge-asset-id'));
-    if (assetId) {
-      const direct = assets.find((asset) => String(asset.id || '') === assetId && asset.kind === 'image');
-      if (direct) return direct;
-    }
-    const reference = String(placeholder.getAttribute('data-ge-image-ref') || '');
-    const path = assetUrlPath(reference);
-    if (path) {
-      const matching = assets.find((asset) => asset && asset.kind === 'image' && assetUrlPath(asset.url) === path);
-      if (matching) return matching;
-    }
-    return null;
+  function placeholderReference(placeholder) {
+    const attribute = placeholder.getAttribute('data-ge-image-ref');
+    let path = '';
+    try {
+      const url = new URL(attribute);
+      // Markdown emits these already-validated references without signed queries.
+      if (url.protocol === 'https:' && allowedMediaHost(url.hostname) &&
+          attribute === `${url.origin}${url.pathname}`) path = attribute;
+    } catch (_) { /* A blocked or missing reference cannot match an asset. */ }
+    return {
+      id: safeAssetId(placeholder.getAttribute('data-ge-asset-id')),
+      path,
+      alt: placeholder.getAttribute('data-ge-alt') || placeholder.textContent.replace(/^图片：?/, '').trim()
+    };
   }
 
-  function replaceImagePlaceholder(placeholder, asset) {
+  function refreshImage(placeholder, reference, asset) {
     const document = placeholder.ownerDocument;
-    const alt = placeholder.getAttribute('data-ge-alt') || placeholder.textContent.replace(/^图片：?/, '').trim();
-    const imageData = asset && asset.status === 'ready' ? isRasterDataUrl(asset.dataUrl) : null;
+    const { alt } = reference;
+    const previousImage = reference.validatedImage;
+    const imageData = asset && asset.status === 'ready'
+      ? (previousImage && previousImage.dataUrl === asset.dataUrl ? previousImage : isRasterDataUrl(asset.dataUrl))
+      : null;
+    let replacement;
+    let validatedImage;
     if (imageData && (!asset.mimeType || String(asset.mimeType).toLowerCase().split(';', 1)[0] === imageData.mimeType)) {
-      const image = document.createElement('img');
-      image.src = imageData.dataUrl;
-      image.alt = alt || String(asset.name || '对话图片');
-      image.className = 'ge-ready-image';
-      placeholder.replaceWith(image);
-      return;
+      const imageAlt = alt || String(asset.name || '对话图片');
+      validatedImage = imageData;
+      if (placeholder.className === 'ge-ready-image' &&
+          placeholder.getAttribute('src') === imageData.dataUrl && placeholder.alt === imageAlt) return;
+      replacement = document.createElement('img');
+      replacement.src = imageData.dataUrl;
+      replacement.alt = imageAlt;
+      replacement.className = 'ge-ready-image';
+    } else {
+      const error = safeVisibleError(asset && asset.error);
+      const name = asset && asset.name ? safeFilename(asset.name) : alt;
+      const label = asset && asset.status === 'pending' && !error
+        ? `正在读取图片${name ? `：${name}` : ''}`
+        : `图片不可用${name ? `：${name}` : ''}${error ? `（${error}）` : ''}`;
+      if (placeholder.className === 'ge-unavailable-image' && placeholder.textContent === label) return;
+      replacement = textElement(document, 'span', 'ge-unavailable-image', label);
     }
-    const error = safeVisibleError(asset && asset.error);
-    const name = asset && asset.name ? safeFilename(asset.name) : alt;
-    const label = asset && asset.status === 'pending' && !error
-      ? `正在读取图片${name ? `：${name}` : ''}`
-      : `图片不可用${name ? `：${name}` : ''}${error ? `（${error}）` : ''}`;
-    const fallback = textElement(document, 'span', 'ge-unavailable-image', label);
-    placeholder.replaceWith(fallback);
+    imageReferences.set(replacement, { ...reference, validatedImage });
+    placeholder.replaceWith(replacement);
   }
 
   function renderAttachmentCard(document, asset) {
@@ -288,10 +295,101 @@
       if (detail) card.append(textElement(document, 'span', 'ge-attachment-meta', detail));
     } else {
       const error = safeVisibleError(asset.error);
-      const reason = error || (asset.status === 'ready' ? '附件类型不支持安全下载' : '附件不可用');
+      const reason = error || (asset.status === 'ready' ? '附件类型不支持安全下载' :
+        asset.status === 'pending' ? '正在读取附件' : '附件不可用');
       card.append(textElement(document, 'span', 'ge-unavailable-attachment', `${name}（${reason}）`));
     }
     return card;
+  }
+
+  function refreshRichAssets(container, conversation, changedAssets) {
+    if (!container || !container.ownerDocument) return;
+    const assets = Array.isArray(conversation && conversation.assets) ? conversation.assets : [];
+    const messages = Array.isArray(conversation && conversation.messages) ? conversation.messages : [];
+    const changedIds = new Set();
+    const affectedMessages = changedAssets != null ? new Set() : null;
+    if (affectedMessages) {
+      for (const changed of changedAssets) {
+        const record = changed && typeof changed === 'object' ? changed : null;
+        if (record && record.messageId != null) affectedMessages.add(String(record.messageId));
+        const id = safeAssetId(record ? record.id : changed);
+        if (id) changedIds.add(id);
+      }
+      if (changedIds.size) {
+        for (const asset of assets) {
+          if (asset && changedIds.has(String(asset.id || ''))) {
+            affectedMessages.add(String(asset.messageId == null ? '' : asset.messageId));
+          }
+        }
+      }
+    }
+
+    const referencedIds = new Map();
+    for (const message of messages) {
+      if (!message || !Array.isArray(message.assetIds) || !message.assetIds.length) continue;
+      const id = String(message.id == null ? '' : message.id);
+      if (affectedMessages && !affectedMessages.has(id)) {
+        if (!message.assetIds.some((assetId) => changedIds.has(String(assetId)))) continue;
+        affectedMessages.add(id);
+      }
+      referencedIds.set(id, new Set(message.assetIds.map(String)));
+    }
+    if (affectedMessages && !affectedMessages.size) return;
+
+    const byMessage = new Map();
+    const sharedImages = new Map();
+    for (const asset of assets) {
+      if (!asset) continue;
+      const id = safeAssetId(asset.id);
+      if (id && asset.kind === 'image' && !sharedImages.has(id)) sharedImages.set(id, asset);
+      const messageId = String(asset.messageId == null ? '' : asset.messageId);
+      if (affectedMessages && !affectedMessages.has(messageId)) continue;
+      if (!byMessage.has(messageId)) {
+        byMessage.set(messageId, { byId: new Map(), byPath: new Map(), attachments: [] });
+      }
+      const group = byMessage.get(messageId);
+      if (asset.kind === 'image') {
+        const path = assetUrlPath(asset.url);
+        if (id && !group.byId.has(id)) group.byId.set(id, asset);
+        if (path && !group.byPath.has(path)) group.byPath.set(path, asset);
+      } else if (asset.kind === 'attachment') {
+        group.attachments.push(asset);
+      }
+    }
+
+    const document = container.ownerDocument;
+    for (const article of container.querySelectorAll('article[data-message-id]')) {
+      const messageId = article.getAttribute('data-message-id');
+      if (affectedMessages && !affectedMessages.has(messageId)) continue;
+      const group = byMessage.get(messageId);
+      const explicitIds = referencedIds.get(messageId);
+      for (const node of article.querySelectorAll('[data-ge-image-placeholder="true"], .ge-ready-image, .ge-unavailable-image')) {
+        const reference = imageReferences.get(node) ||
+          (node.getAttribute('data-ge-image-placeholder') === 'true' ? placeholderReference(node) : null);
+        if (!reference) continue;
+        const asset = group?.byId.get(reference.id) ||
+          (explicitIds?.has(reference.id) ? sharedImages.get(reference.id) : null) ||
+          group?.byPath.get(reference.path);
+        refreshImage(node, reference, asset);
+      }
+      const currentSection = attachmentSections.get(article);
+      if (!group || !group.attachments.length) {
+        if (currentSection) currentSection.remove();
+        attachmentSections.delete(article);
+        continue;
+      }
+      const section = document.createElement('section');
+      section.className = 'ge-attachments';
+      section.setAttribute('aria-label', '附件');
+      for (const asset of group.attachments) section.append(renderAttachmentCard(document, asset));
+      if (currentSection && currentSection.parentNode === article) {
+        if (currentSection.isEqualNode(section)) continue;
+        currentSection.replaceWith(section);
+      } else {
+        article.append(section);
+      }
+      attachmentSections.set(article, section);
+    }
   }
 
   function rejectMermaidSource(source) {
@@ -404,8 +502,7 @@
   async function enhanceRichContent(container, conversation) {
     if (!container || !container.ownerDocument) return;
     const document = container.ownerDocument;
-    const messages = new Map((Array.isArray(conversation && conversation.messages) ? conversation.messages : [])
-      .map((message) => [String(message.id || ''), message]));
+    refreshRichAssets(container, conversation);
     const katex = unwrapVendor('katex') || root.katex;
     const purifier = getPurifier();
     for (const placeholder of Array.from(container.querySelectorAll('[data-ge-math="true"]'))) {
@@ -443,22 +540,6 @@
       if (!rendered && !source.nextElementSibling?.matches('[data-ge-mermaid-error]')) {
         source.after(textElement(document, 'p', 'ge-mermaid-error', '图表无法安全渲染；保留 Mermaid 源码。'));
         source.nextElementSibling.setAttribute('data-ge-mermaid-error', 'true');
-      }
-    }
-
-    for (const article of Array.from(container.querySelectorAll('article[data-message-id]'))) {
-      const message = messages.get(article.getAttribute('data-message-id')) || { id: article.getAttribute('data-message-id') };
-      const assets = messageAssets(conversation, message);
-      for (const placeholder of Array.from(article.querySelectorAll('[data-ge-image-placeholder="true"]'))) {
-        replaceImagePlaceholder(placeholder, findImageAsset(message, assets, placeholder));
-      }
-      const attachments = assets.filter((asset) => asset.kind === 'attachment');
-      if (attachments.length) {
-        const section = document.createElement('section');
-        section.className = 'ge-attachments';
-        section.setAttribute('aria-label', '附件');
-        for (const asset of attachments) section.append(renderAttachmentCard(document, asset));
-        article.append(section);
       }
     }
   }
@@ -652,7 +733,9 @@
     const clone = safeSnapshotClone(container);
     const document = clone.ownerDocument || root.document;
     const host = document && document.body;
-    const canAttach = Boolean(host && !clone.isConnected);
+    const formulas = clone.querySelectorAll('[data-ge-math="true"][data-ge-rendered="true"]');
+    const diagrams = clone.querySelectorAll('svg.ge-mermaid-diagram');
+    const canAttach = Boolean(host && !clone.isConnected && (formulas.length || diagrams.length));
     if (canAttach) {
       clone.setAttribute('data-ge-snapshot-measuring', 'true');
       clone.style.position = 'fixed';
@@ -663,7 +746,7 @@
       host.append(clone);
     }
     try {
-      for (const math of Array.from(clone.querySelectorAll('[data-ge-math="true"][data-ge-rendered="true"]'))) {
+      for (const math of formulas) {
         const snapshot = await mathCanvas(math, document);
         if (snapshot) replaceWithSnapshotImage(math, snapshot.dataUrl, imageAltFor(math), snapshot);
         else {
@@ -671,7 +754,7 @@
           math.replaceWith(textElement(document, 'code', 'ge-math-source-fallback', source));
         }
       }
-      for (const svg of Array.from(clone.querySelectorAll('svg.ge-mermaid-diagram'))) {
+      for (const svg of diagrams) {
         const data = await svgCanvas(svg, document);
         if (data) replaceWithSnapshotImage(svg, data, imageAltFor(svg));
         else {
@@ -707,5 +790,6 @@
 
   api.richBodyHtml = richBodyHtml;
   api.enhanceRichContent = enhanceRichContent;
+  api.refreshRichAssets = refreshRichAssets;
   api.snapshotRichContent = snapshotRichContent;
 })(globalThis);

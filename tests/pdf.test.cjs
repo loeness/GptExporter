@@ -221,6 +221,24 @@ test('keeps a short inline TeX image between its surrounding text and blocks a t
   assert.ok(definition.content.some((node) => node && node.text && JSON.stringify(node.text).includes('后续说明')));
 });
 
+test('finds JPEG dimensions after a long metadata segment and limits tall images to the page', () => {
+  const metadataLength = 0xff00;
+  const bytes = Buffer.alloc(4 + metadataLength + 12);
+  bytes.set([0xff, 0xd8, 0xff, 0xe1]);
+  bytes.writeUInt16BE(metadataLength, 4);
+  bytes.set([0xff, 0xc2, 0, 8, 8, 0x10, 0, 0, 0x40, 1, 0xff, 0xd9], 4 + metadataLength);
+  const jpeg = `data:image/jpeg;base64,${bytes.toString('base64')}`;
+  const container = makeContainer(`<article data-message-id="selected"><img src="${jpeg}"></article>`);
+  const images = [];
+  walk(api.pdfDefinition({ container, messages: [selectedMessage] }), (node) => {
+    if (node.image) images.push(node);
+  });
+  assert.equal(images.length, 1);
+  assert.equal(images[0].image, jpeg);
+  assert.ok(images[0].width < 12);
+  assert.ok(images[0].maxHeight < 700);
+});
+
 test('filters unselected messages and embeds only ready selected local attachments', () => {
   const conversation = {
     title: '过滤测试',
@@ -294,6 +312,69 @@ test('generates bytes with pdfmake getBuffer after registering the local CJK fon
   });
   assert.equal(calls.getBuffer, true);
   assert.equal(calls.definition.defaultStyle.font, 'GptExporterNotoSansCJKsc');
+});
+
+test('bounds PDF raster conversions, shares repeated images, and substitutes unreadable images', async (context) => {
+  const compactPng = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X9YQAAAAASUVORK5CYII=';
+  const largeHeader = Buffer.from(png.split(',')[1], 'base64');
+  largeHeader.writeUInt32BE(3000, 16);
+  largeHeader.writeUInt32BE(1500, 20);
+  const oversized = `data:image/png;base64,${largeHeader.toString('base64')}`;
+  const unreadable = 'data:image/webp;base64,AAAA';
+  const jpegHeader = Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0, 8, 8, 0, 32, 0, 64, 1]);
+  const truncated = `data:image/jpeg;base64,${jpegHeader.toString('base64')}`;
+  const markup = `<article data-message-id="selected"><p><img src="${oversized}"><img src="${oversized}"><img src="${unreadable}" alt="broken screenshot"><img src="${truncated}" alt="truncated JPEG"></p></article>`;
+  const source = makeContainer(markup);
+  const rasters = [];
+  const loads = [];
+  const createElement = global.document.createElement.bind(global.document);
+  context.mock.method(global.document, 'createElement', (tag) => {
+    if (tag !== 'canvas') return createElement(tag);
+    const canvas = {
+      getContext() { return { drawImage: (_image, _x, _y, width, height) => rasters.push([width, height]) }; },
+      toDataURL() { return compactPng; }
+    };
+    return canvas;
+  });
+  const oldImage = global.Image;
+  context.after(() => { global.Image = oldImage; });
+  global.Image = class {
+    removeAttribute() {}
+    set src(value) {
+      loads.push(value);
+      this.naturalWidth = 3000;
+      this.naturalHeight = 1500;
+      queueMicrotask(() => (value === oversized ? this.onload() : this.onerror()));
+    }
+  };
+  let definition;
+  const priorVendor = global.GptExporterVendors.pdfMake;
+  const priorFetch = global.fetch;
+  context.after(() => {
+    global.GptExporterVendors.pdfMake = priorVendor;
+    global.fetch = priorFetch;
+  });
+  global.fetch = async () => ({ ok: true, async arrayBuffer() { return new Uint8Array([1]).buffer; } });
+  global.GptExporterVendors.pdfMake = {
+    createPdf(options) {
+      definition = options;
+      return { getBuffer: async () => new Uint8Array([37, 80, 68, 70]) };
+    }
+  };
+  await api.buildPdf({ container: source, messages: [selectedMessage] });
+  assert.deepEqual(loads, [oversized, unreadable, truncated]);
+  assert.deepEqual(rasters, [[2400, 1200]]);
+  assert.equal(source.querySelector('img').getAttribute('src'), oversized);
+  assert.deepEqual(definition.images, { gpt_exporter_image_1: compactPng });
+  const refs = [];
+  walk(definition.content, (node) => { if (node.image) refs.push(node.image); });
+  assert.deepEqual(refs, ['gpt_exporter_image_1', 'gpt_exporter_image_1']);
+  assert.match(definitionText(definition.content), /broken screenshot/);
+  assert.match(definitionText(definition.content), /truncated JPEG/);
+
+  await api.buildPdf({ container: source, messages: [selectedMessage], consumeContainer: true });
+  assert.equal(source.querySelector('img').getAttribute('src'), compactPng);
+  assert.equal(source.querySelector('[alt="broken screenshot"]').hasAttribute('src'), false);
 });
 
 test('rejects an empty message selection and unsupported page settings clearly', () => {

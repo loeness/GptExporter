@@ -99,6 +99,7 @@
         await reportPhase(context,'pdf');
         const bytes = await api.buildPdf({
           container: snapshot,
+          consumeContainer: true,
           conversation: model,
           messages,
           includeMetadata: true,

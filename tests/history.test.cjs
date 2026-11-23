@@ -191,6 +191,25 @@ test("keeps image placeholders when fallback Markdown replaces message parts", (
   assert.equal(model.assets[0].fileId, "synthetic-image-1");
 });
 
+test("preserves a 6000-message chain and its active branch without recursion", () => {
+  const count = 6000;
+  const mapping = Object.fromEntries(Array.from({length: count}, (_, index) => {
+    const id = `message-${index}`;
+    return [id, {
+      parent: index ? `message-${index - 1}` : null,
+      children: index + 1 < count ? [`message-${index + 1}`] : [],
+      message: {id, author: {role: index % 2 ? "assistant" : "user"}, content: {parts: [`Text ${index}`]}}
+    }];
+  }));
+  const model = globalThis.GptExporter.normalizeConversation({mapping, current_node: `message-${count - 1}`},
+    {url: "https://chatgpt.com/c/" + IDS.conversation, kind: "api", complete: true});
+  assert.equal(model.source.complete, true);
+  assert.equal(model.branches[0].id, model.activeBranchId);
+  assert.equal(model.messages.length, count);
+  assert.deepEqual(model.branches[0].messageIds, Object.keys(mapping));
+  assert.equal(model.messages.at(-1).text, `Text ${count - 1}`);
+});
+
 test("marks cycles, missing parents, and flat message payloads incomplete", () => {
   const cyclic = graph({
     current_node: "assistant-a",

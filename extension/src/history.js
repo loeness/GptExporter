@@ -215,23 +215,22 @@
 
     for (const [id, parent] of parents) if (parent && nodes.has(parent)) children.get(parent).push(id);
     for (const [parentId, node] of nodes) {
-      const ordered = [];
+      const ordered = new Set();
       if (Array.isArray(node.children)) {
         for (const childId of node.children) {
-          if (typeof childId === "string" && parents.get(childId) === parentId && !ordered.includes(childId)) ordered.push(childId);
+          if (typeof childId === "string" && parents.get(childId) === parentId) ordered.add(childId);
         }
       }
-      for (const childId of children.get(parentId)) if (!ordered.includes(childId)) ordered.push(childId);
-      children.set(parentId, ordered);
+      for (const childId of children.get(parentId)) ordered.add(childId);
+      children.set(parentId, [...ordered]);
     }
 
-    const cyclic = new Set();
+    const checked = new Set();
     for (const id of nodes.keys()) {
       const path = new Set();
       let cursor = id;
-      while (cursor && nodes.has(cursor)) {
+      while (cursor && !checked.has(cursor)) {
         if (path.has(cursor)) {
-          cyclic.add(cursor);
           structurallyComplete = false;
           addWarning(warnings, "节点关系包含循环（涉及 " + cursor + "）。");
           break;
@@ -239,6 +238,7 @@
         path.add(cursor);
         cursor = parents.get(cursor) || null;
       }
+      for (const visited of path) checked.add(visited);
     }
 
     const messageIdsByNode = new Map();
@@ -385,17 +385,16 @@
 
     const orderedNodes = [];
     const walked = new Set();
-    function walk(nodeId, activePath = new Set()) {
-      if (walked.has(nodeId)) return;
-      if (activePath.has(nodeId)) {
-        structurallyComplete = false;
-        return;
+    function walk(startId) {
+      const stack = [startId];
+      while (stack.length) {
+        const id = stack.pop();
+        if (walked.has(id)) continue;
+        walked.add(id);
+        orderedNodes.push(id);
+        const childIds = children.get(id);
+        for (let index = childIds.length - 1; index >= 0; index--) stack.push(childIds[index]);
       }
-      const nextPath = new Set(activePath);
-      nextPath.add(nodeId);
-      walked.add(nodeId);
-      orderedNodes.push(nodeId);
-      for (const childId of children.get(nodeId) || []) walk(childId, nextPath);
     }
     const roots = [...nodes.keys()].filter((id) => !parents.get(id) || !nodes.has(parents.get(id)));
     for (const rootId of roots) walk(rootId);
@@ -414,6 +413,7 @@
     if (!leaves.length && nodes.has(graph.current_node)) leaves = [graph.current_node];
 
     const branches = [];
+    const branchPaths = new Set();
     for (const leafId of leaves.slice(0, MAX_NODES)) {
       const path = [];
       const seen = new Set();
@@ -431,7 +431,10 @@
       }
       path.reverse();
       const messageIds = path.map((nodeId) => messageIdsByNode.get(nodeId)).filter(Boolean);
-      if (!messageIds.length || branches.some((branch) => branch.messageIds.join("\u0000") === messageIds.join("\u0000"))) continue;
+      if (!messageIds.length) continue;
+      const key = messageIds.join("\u0000");
+      if (branchPaths.has(key)) continue;
+      branchPaths.add(key);
       branches.push({ id: "branch-" + (branches.length + 1), label: "Branch " + (branches.length + 1), leafId: messageIds.at(-1), messageIds });
       if (!validPath) addWarning(warnings, "循环分支已截断。");
     }

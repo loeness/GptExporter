@@ -5,8 +5,13 @@ importScripts('platforms.js');
 const SESSION_PREFIX = 'export:';
 const MAX_BYTES = 8 * 1024 * 1024;
 const MAX_AGE = 24 * 60 * 60 * 1000;
+const MAX_ASSETS = 300;
+const assetLookups = new Map();
+const MAX_IMAGE_EDGE = 1800;
+const IMAGE_TARGET_BYTES = 900 * 1024;
 let openQueue = Promise.resolve();
 let activeDirectId = '';
+let directAssetLookup;
 let quickPending = false;
 let activeDirectTabId;
 let directPhase = '准备文档';
@@ -69,16 +74,21 @@ function validateConversation(input) {
     conversationId: chatgpt ? String(input.source?.conversationId || '').slice(0, 250) : ''
   };
   if (!chatgpt) model.warnings = [`${platform.label}：仅包含当前页面已加载的消息，未读取完整历史和其他分支。`,...model.warnings].slice(0,10);
-  model.assets = (chatgpt && Array.isArray(input.assets) ? input.assets : []).slice(0, 300).filter(asset => asset && ['image','attachment'].includes(asset.kind)).map(asset => ({
+  const assets = chatgpt && Array.isArray(input.assets) ? input.assets : [];
+  if (assets.length > MAX_ASSETS) model.warnings.unshift(`对话中的媒体超过 ${MAX_ASSETS} 个，超出部分未读取。`);
+  model.assets = assets.slice(0, MAX_ASSETS).filter(asset => asset && ['image','attachment'].includes(asset.kind)).map(asset => ({
     id: String(asset.id || '').slice(0, 250), messageId: String(asset.messageId || '').slice(0, 250), kind:asset.kind,
     name:String(asset.name || '附件').slice(0, 250),mimeType:String(asset.mimeType || 'application/octet-stream').slice(0, 100),
     size:Number.isFinite(asset.size) ? asset.size : undefined,fileId:String(asset.fileId || '').slice(0, 250),
     url:typeof asset.url === 'string' && approvedMediaUrl(asset.url) ? asset.url : '',status:'pending'
   }));
-  if (new TextEncoder().encode(JSON.stringify(model)).length > MAX_BYTES) {
-    throw new Error('当前对话文字与分支超过 8 MB，请缩小范围后重试。');
-  }
   return model;
+}
+
+function measureModel(model) {
+  const bytes = new TextEncoder().encode(JSON.stringify(model)).length;
+  if (bytes > MAX_BYTES) throw new Error('当前对话文字与分支超过 8 MB，请缩小范围后重试。');
+  return bytes;
 }
 
 function modelFromSender(input, sender) {
@@ -91,6 +101,7 @@ function modelFromSender(input, sender) {
 }
 
 async function storeExport(model) {
+  const modelBytes = measureModel(model);
   const records = await chrome.storage.session.get(null);
   const entries = Object.entries(records).filter(([key]) => key.startsWith(SESSION_PREFIX));
   const stale = entries.filter(([, value]) => !value?.createdAt || Date.now() - value.createdAt > MAX_AGE);
@@ -99,7 +110,7 @@ async function storeExport(model) {
   const existingBytes = new TextEncoder().encode(JSON.stringify(Object.fromEntries(
     entries.filter(([key]) => !stale.some(([oldKey]) => oldKey === key))
   ))).length;
-  if (existingBytes + new TextEncoder().encode(JSON.stringify(model)).length > 9 * 1024 * 1024) {
+  if (existingBytes + modelBytes > 9 * 1024 * 1024) {
     throw new Error('预览缓存已满，请在已有预览中点击“清除”后重试。');
   }
   const id = crypto.randomUUID();
@@ -141,6 +152,25 @@ function withTimeout(promise, milliseconds, message) {
     .finally(() => clearTimeout(timer));
 }
 
+function assetLookup(model) {
+  return { source: model.source, url: model.url, assets: new Map(model.assets.map(asset => [asset.id, asset])) };
+}
+
+async function withAssetRecord(exportId, fromOffscreen, callback) {
+  if (fromOffscreen) return callback(directAssetLookup);
+  const key = SESSION_PREFIX + exportId;
+  let lookup = assetLookups.get(key);
+  if (!lookup) {
+    lookup = { users: 0, pending: chrome.storage.session.get(key).then(records => records[key] && assetLookup(records[key])) };
+    assetLookups.set(key, lookup);
+  }
+  lookup.users++;
+  try { return await callback(await lookup.pending); }
+  finally {
+    if (--lookup.users === 0) assetLookups.delete(key);
+  }
+}
+
 async function waitForDownload(id) {
   let listener;
   const pending = new Promise((resolve,reject) => {
@@ -168,11 +198,13 @@ async function quickExport(message, sender) {
   if (!Object.hasOwn(extensions,format)) throw new Error('快捷导出格式无效。');
   if (!chrome.offscreen?.createDocument || !chrome.downloads?.download) throw new Error('浏览器不支持后台导出，请使用 SELECT 打开导出页面。');
   const model = quickModel(message.conversation,sender,message.preset);
-  const {id,key} = await storeExport(model);
+  measureModel(model);
+  const id = crypto.randomUUID();
   let offscreen = false;
   // Keep the worker responsive during long local rendering/media requests.
   const keepAlive = setInterval(() => { chrome.runtime.getPlatformInfo().catch(() => {}); },20000);
   activeDirectId = id;
+  directAssetLookup = assetLookup(model);
   activeDirectTabId = model.source.sourceTabId; directPhase = '准备文档';
   try {
     const documentUrl = chrome.runtime.getURL('direct-export.html');
@@ -185,7 +217,7 @@ async function quickExport(message, sender) {
     }
     offscreen = true;
     const result = await withTimeout(chrome.runtime.sendMessage({type:'GPT_EXPORTER_DIRECT_RENDER',exportId:id,format,conversation:model}),
-      150000,() => `本地文件生成超时（${directPhase}），请使用 SELECT 打开导出页面重试。`);
+      240000,() => `本地文件生成超时（${directPhase}），请使用 SELECT 选择部分消息后重试。`);
     if (!result?.ok) throw new Error(result?.error || '后台文件生成失败。');
     if (typeof result.url !== 'string' || !result.url.startsWith('blob:' + chrome.runtime.getURL(''))) throw new Error('后台返回的下载地址无效。');
     const suffix = '.' + extensions[format];
@@ -205,8 +237,8 @@ async function quickExport(message, sender) {
       try { await chrome.offscreen.closeDocument(); } catch (error) { failures.push(error); }
     }
     activeDirectId = '';
+    directAssetLookup = undefined;
     activeDirectTabId = undefined;
-    try { await chrome.storage.session.remove(key); } catch (error) { failures.push(error); }
     if (failures.length) throw new Error('快捷导出已结束，但临时数据清理失败，请重新加载扩展。');
   }
 }
@@ -224,41 +256,109 @@ function readerSender(sender) {
   return sender.id === chrome.runtime.id && String(sender.url || '').split('?')[0] === chrome.runtime.getURL('reader.html');
 }
 
-async function loadAsset(message) {
+async function loadAsset(message, fromOffscreen) {
   if (!/^[\w-]{1,100}$/.test(message.exportId || '')) throw new Error('导出记录编号无效。');
-  const key = SESSION_PREFIX + message.exportId;
-  const model = (await chrome.storage.session.get(key))[key];
-  const asset = model?.assets?.find(item => item.id === message.assetId);
+  return withAssetRecord(message.exportId, fromOffscreen, model => readAsset(model, message.assetId));
+}
+
+async function compactImage(bytes, mimeType) {
+  const original = { bytes, mimeType };
+  if (typeof createImageBitmap !== 'function' || typeof OffscreenCanvas !== 'function') return original;
+  if (mimeType === 'image/png' && bytes.length >= 24) {
+    const header = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const width = header.getUint32(16), height = header.getUint32(20);
+    if (width * height > 64000000) throw new Error('图片像素超过 6,400 万，无法安全嵌入。');
+    if (bytes.length <= IMAGE_TARGET_BYTES && Math.max(width, height) <= MAX_IMAGE_EDGE) return original;
+  } else if (bytes.length <= IMAGE_TARGET_BYTES) {
+    return original;
+  }
+
+  let bitmap, expired = false;
+  try {
+    const decoding = createImageBitmap(new Blob([bytes], { type: mimeType })).then(image => {
+      if (expired) image.close();
+      return image;
+    });
+    bitmap = await withTimeout(decoding, 8000, '图片解码超时。');
+  } catch (_) {
+    expired = true;
+    return original;
+  }
+
+  const canvas = new OffscreenCanvas(1, 1);
+  try {
+    let scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(bitmap.width, bitmap.height));
+    const resized = scale < 1;
+    const context = canvas.getContext('2d', { willReadFrequently: mimeType !== 'image/jpeg' });
+    if (!context) return original;
+    let output;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+      context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      output = await canvas.convertToBlob({ type: mimeType === 'image/jpeg' ? 'image/jpeg' : 'image/png', quality: 0.86 });
+      if (output.size > IMAGE_TARGET_BYTES && output.type === 'image/png') {
+        const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+        let opaque = true;
+        for (let offset = 3; offset < pixels.length; offset += 4) {
+          if (pixels[offset] !== 255) { opaque = false; break; }
+        }
+        if (opaque) output = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.86 });
+      }
+      if (output.size <= IMAGE_TARGET_BYTES) break;
+      scale *= 0.72;
+    }
+    if (!output?.size || (!resized && output.size >= bytes.length)) return original;
+    return { bytes: new Uint8Array(await output.arrayBuffer()), mimeType: output.type };
+  } catch (_) {
+    return original;
+  } finally {
+    bitmap.close();
+    canvas.width = canvas.height = 1;
+  }
+}
+
+async function readAsset(model, assetId) {
+  const asset = model?.assets.get(assetId);
   if (!asset) throw new Error('附件不在本次对话中。');
   let resolved = asset;
-  if (Number.isInteger(model.source?.sourceTabId)) {
+  if ((asset.fileId || !asset.url) && Number.isInteger(model.source?.sourceTabId)) {
     try {
-      const response = await chrome.tabs.sendMessage(model.source.sourceTabId, {type:'GPT_EXPORTER_RESOLVE_ASSET',asset,
-        source:{kind:model.source.kind,conversationId:model.source.conversationId},url:model.url});
+      const response = await withTimeout(chrome.tabs.sendMessage(model.source.sourceTabId, {
+        type:'GPT_EXPORTER_RESOLVE_ASSET',asset,source:{kind:model.source.kind,conversationId:model.source.conversationId},url:model.url
+      }), 40000, '原对话未及时返回媒体地址。');
       if (response?.ok) resolved = {...asset,...response.asset};
       else if (!asset.url) throw new Error(response?.error || '附件地址未取得。');
     } catch (error) { if (!asset.url) throw new Error('请保持原对话标签页打开，以读取附件。' + (error.message || '')); }
   }
-  const maximum = 12 * 1024 * 1024;
+  const limitMB = asset.kind === 'image' ? 20 : 12;
+  const maximum = limitMB * 1024 * 1024;
+  const tooLarge = `单个${asset.kind === 'image' ? '图片' : '附件'}超过 ${limitMB} MB。`;
   let bytes, mimeType;
   if (typeof resolved.dataUrl === 'string' && /^data:[\w.+/-]+;base64,/.test(resolved.dataUrl)) {
     const encoded=resolved.dataUrl.slice(resolved.dataUrl.indexOf(',')+1);
-    if(encoded.length>Math.ceil(maximum/3)*4||encoded.length%4!==0||!/^[A-Za-z0-9+/]*={0,2}$/.test(encoded))throw new Error('附件编码无效或单个附件超过 12 MB。');
+    if (encoded.length > Math.ceil(maximum / 3) * 4) throw new Error(tooLarge);
+    if (encoded.length % 4 !== 0 || /[^A-Za-z0-9+/=]/.test(encoded)) throw new Error('附件编码无效。');
     const raw = atob(encoded);
-    if (raw.length > maximum) throw new Error('单个附件超过 12 MB。');
-    bytes = Uint8Array.from(raw, value => value.charCodeAt(0)); mimeType = resolved.dataUrl.slice(5,resolved.dataUrl.indexOf(';'));
+    if (raw.length > maximum) throw new Error(tooLarge);
+    bytes = new Uint8Array(raw.length);
+    for (let index = 0; index < raw.length; index++) bytes[index] = raw.charCodeAt(index);
+    mimeType = resolved.dataUrl.slice(5,resolved.dataUrl.indexOf(';'));
   } else {
     if (!approvedMediaUrl(resolved.url)) throw new Error('附件地址不可用，或不属于允许的 ChatGPT 媒体域名。');
     const parsed = new URL(resolved.url);
     const response = await fetch(resolved.url, {credentials:['chatgpt.com','chat.openai.com'].includes(parsed.hostname)?'include':'omit',
       redirect:'error',referrerPolicy:'no-referrer',signal:AbortSignal.timeout(30000)});
     if (!response.ok) throw new Error(`附件读取失败（HTTP ${response.status}）。`);
-    if (Number(response.headers.get('content-length')) > maximum) throw new Error('单个附件超过 12 MB。');
+    if (Number(response.headers.get('content-length')) > maximum) {
+      await response.body?.cancel().catch(() => {});
+      throw new Error(tooLarge);
+    }
     mimeType = String(response.headers.get('content-type') || asset.mimeType).split(';')[0].trim();
     const reader = response.body.getReader(); const chunks = []; let length = 0;
     for (;;) {
       const {value,done} = await reader.read(); if (done) break;
-      length += value.length; if (length > maximum) { await reader.cancel(); throw new Error('单个附件超过 12 MB。'); } chunks.push(value);
+      length += value.length; if (length > maximum) { await reader.cancel(); throw new Error(tooLarge); } chunks.push(value);
     }
     bytes = new Uint8Array(length); let offset=0; for (const chunk of chunks) { bytes.set(chunk,offset); offset += chunk.length; }
   }
@@ -267,12 +367,19 @@ async function loadAsset(message) {
       gif=bytes[0]===71&&bytes[1]===73&&bytes[2]===70, webp=String.fromCharCode(...bytes.slice(0,4))==='RIFF'&&String.fromCharCode(...bytes.slice(8,12))==='WEBP';
     if (!(png||jpeg||gif||webp)) throw new Error('图片不是受支持的 PNG、JPEG、GIF 或 WebP，未执行嵌入。');
     mimeType=png?'image/png':jpeg?'image/jpeg':gif?'image/gif':'image/webp';
+    ({ bytes, mimeType } = await compactImage(bytes, mimeType));
   }
   if (!/^[\w.+-]+\/[\w.+-]+$/.test(mimeType)) mimeType='application/octet-stream';
   // Preserve active formats only as download-only bytes; never make an HTML/SVG document in the reader.
   if(asset.kind==='attachment'&&/(?:html|svg|javascript|ecmascript|xml)/i.test(mimeType))mimeType='application/octet-stream';
-  let binary=''; for (let offset=0;offset<bytes.length;offset+=32768) binary+=String.fromCharCode(...bytes.subarray(offset,offset+32768));
-  return {ok:true,asset:{dataUrl:`data:${mimeType};base64,${btoa(binary)}`,mimeType,size:bytes.length,name:String(resolved.name||asset.name),status:'ready'}};
+  let encoded;
+  if (typeof bytes.toBase64 === 'function') encoded = bytes.toBase64();
+  else {
+    let binary = '';
+    for (let offset = 0; offset < bytes.length; offset += 32768) binary += String.fromCharCode(...bytes.subarray(offset, offset + 32768));
+    encoded = btoa(binary);
+  }
+  return {ok:true,asset:{dataUrl:`data:${mimeType};base64,${encoded}`,mimeType,size:bytes.length,name:String(resolved.name||asset.name),status:'ready'}};
 }
 
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
@@ -289,7 +396,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     const offscreenSender = sender.id === chrome.runtime.id && !sender.tab && sender.url === chrome.runtime.getURL('direct-export.html') &&
       activeDirectId && message.exportId === activeDirectId;
     if (!readerSender(sender) && !offscreenSender) { respond({ok:false,error:'来源未授权。'}); return false; }
-    loadAsset(message).then(respond).catch(error => respond({ok:false,error:error.message || '附件读取失败。'}));
+    loadAsset(message, Boolean(offscreenSender)).then(respond).catch(error => respond({ok:false,error:error.message || '附件读取失败。'}));
     return true;
   }
   if (!['GPT_EXPORTER_OPEN','GPT_EXPORTER_QUICK'].includes(message?.type)) return false;
@@ -297,8 +404,8 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   const direct = message.type === 'GPT_EXPORTER_QUICK';
   if (direct && quickPending) { respond({ok:false,error:'已有快捷导出正在处理，请稍后重试。'}); return false; }
   if (direct) quickPending = true;
-  const work = openQueue.then(() => message.type === 'GPT_EXPORTER_QUICK' ? quickExport(message,sender) : openExport(message.conversation,sender));
-  openQueue = work.catch(() => {});
+  const work = direct ? quickExport(message, sender) : openQueue.then(() => openExport(message.conversation, sender));
+  if (!direct) openQueue = work.catch(() => {});
   work.then(result => { if (direct) quickPending = false; respond(result); },error => {
     if (direct) quickPending = false;
     respond({ok:false,error:error.message || '导出失败，请重试。'});

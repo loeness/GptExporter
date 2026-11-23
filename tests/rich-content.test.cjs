@@ -154,3 +154,111 @@ test('keeps legacy HTML fallback when the local Markdown vendor is absent', () =
     global.GptExporterVendors.MarkdownIt = previous;
   }
 });
+
+test('refreshes only affected messages and preserves rendered formulas and unchanged nodes', async () => {
+  const conversation = {
+    messages: [
+      { id: 'first', role: 'assistant', markdown: 'Equation $y$ and ![Azure image](https://abc123.blob.core.windows.net/container/image.png?sv=2025-01-01&se=2030-01-01&sig=private)' },
+      { id: 'second', role: 'assistant', markdown: '![Other image](gpt-exporter-asset:other)' }
+    ],
+    assets: [
+      { id: 'ignored', messageId: 'second', kind: 'image', status: 'ready', url: 'https://abc123.blob.core.windows.net/container/image.png?sv=2025-01-01&se=2030-01-01&sig=private', dataUrl: imageData },
+      { id: 'first-image', messageId: 'first', kind: 'image', name: 'azure.png', status: 'pending', url: 'https://abc123.blob.core.windows.net/container/image.png?sv=2025-01-01&se=2030-01-01&sig=private' },
+      { id: 'duplicate-path', messageId: 'first', kind: 'image', status: 'ready', url: 'https://abc123.blob.core.windows.net/container/image.png?sv=2025-01-01&se=2030-01-01&sig=other', dataUrl: imageData },
+      { id: 'report', messageId: 'first', kind: 'attachment', name: 'report.pdf', status: 'pending' },
+      { id: 'other', messageId: 'second', kind: 'image', status: 'pending' },
+      { id: 'other', messageId: 'second', kind: 'image', status: 'ready', dataUrl: imageData }
+    ]
+  };
+  const api = global.GptExporter;
+  const container = dom.window.document.createElement('div');
+  container.innerHTML = api.renderHtmlFragment(conversation, { includeMetadata: false });
+  await api.enhanceRichContent(container, conversation);
+
+  const first = container.querySelector('[data-message-id="first"]');
+  const second = container.querySelector('[data-message-id="second"]');
+  const formula = first.querySelector('.ge-rendered-math');
+  assert.ok(formula);
+  assert.match(first.querySelector('.ge-unavailable-image').textContent, /正在读取图片/);
+  assert.match(first.querySelector('.ge-attachments').textContent, /正在读取附件/);
+  const otherPlaceholder = second.querySelector('.ge-unavailable-image');
+  assert.ok(otherPlaceholder);
+
+  const [, image, , attachment, other] = conversation.assets;
+  Object.assign(image, { status: 'unavailable', error: 'HTTP 403 from https://example.test/?sig=private' });
+  Object.assign(attachment, { status: 'unavailable', error: 'HTTP 404' });
+  Object.assign(other, { status: 'ready', dataUrl: imageData });
+  const renderCount = katexOptions.length;
+  api.refreshRichAssets(container, conversation, [image, 'report']);
+  assert.match(first.querySelector('.ge-unavailable-image').textContent, /HTTP 403/);
+  assert.match(first.querySelector('.ge-attachments').textContent, /HTTP 404/);
+  assert.equal(second.querySelector('.ge-unavailable-image'), otherPlaceholder);
+
+  Object.assign(image, { status: 'ready', dataUrl: imageData });
+  Object.assign(attachment, { status: 'ready', dataUrl: pdfData });
+  api.refreshRichAssets(container, conversation, [image, attachment]);
+  const readyImage = first.querySelector('.ge-ready-image');
+  const readyAttachment = first.querySelector('.ge-attachment-download');
+  assert.equal(readyImage.getAttribute('src'), imageData);
+  assert.equal(readyAttachment.getAttribute('href'), pdfData);
+  api.refreshRichAssets(container, conversation, [image, attachment]);
+  assert.equal(first.querySelector('.ge-ready-image'), readyImage);
+  assert.equal(first.querySelector('.ge-attachment-download'), readyAttachment);
+  assert.equal(first.querySelector('.ge-rendered-math'), formula);
+  assert.equal(katexOptions.length, renderCount);
+
+  api.refreshRichAssets(container, conversation, ['other']);
+  assert.equal(second.querySelector('.ge-ready-image').getAttribute('src'), imageData);
+  const snapshot = await api.snapshotRichContent(container);
+  assert.doesNotMatch(snapshot.innerHTML, /data-ge-(?:image-ref|asset-id|alt)|sig=|blob\.core\.windows\.net/);
+});
+
+test('keeps a snapshot of ordinary content detached from layout', async () => {
+  const container = dom.window.document.createElement('div');
+  container.innerHTML = '<p>plain content</p>';
+  container.getBoundingClientRect = () => { throw new Error('ordinary content should skip measurement'); };
+  const snapshot = await global.GptExporter.snapshotRichContent(container);
+  assert.equal(snapshot.innerHTML, '<p>plain content</p>');
+  assert.equal(snapshot.isConnected, false);
+});
+
+test('refreshes a deduplicated image in every message with an explicit asset reference', async () => {
+  const shared = {
+    id: 'shared-image',
+    messageId: 'owner',
+    kind: 'image',
+    status: 'pending',
+    url: 'https://files.oaiusercontent.com/shared.png?sig=private'
+  };
+  const conversation = {
+    messages: [
+      { id: 'owner', role: 'assistant', assetIds: [shared.id], markdown: '![Owner](gpt-exporter-asset:shared-image)' },
+      { id: 'reused', role: 'assistant', assetIds: [shared.id], markdown: '![Reused](gpt-exporter-asset:shared-image) ![URL only](https://files.oaiusercontent.com/shared.png?sig=private)' },
+      { id: 'unrelated', role: 'assistant', markdown: '![Unlisted](gpt-exporter-asset:shared-image)' }
+    ],
+    assets: [shared]
+  };
+  const api = global.GptExporter;
+  const container = dom.window.document.createElement('div');
+  container.innerHTML = api.renderHtmlFragment(conversation);
+  await api.enhanceRichContent(container, conversation);
+
+  const owner = container.querySelector('[data-message-id="owner"]');
+  const reused = container.querySelector('[data-message-id="reused"]');
+  const unrelated = container.querySelector('[data-message-id="unrelated"]');
+  assert.match(owner.querySelector('.ge-unavailable-image').textContent, /正在读取图片/);
+  assert.match(reused.querySelector('.ge-unavailable-image').textContent, /正在读取图片/);
+
+  Object.assign(shared, { status: 'ready', dataUrl: imageData, mimeType: 'image/png' });
+  api.refreshRichAssets(container, conversation, [shared]);
+  assert.equal(owner.querySelector('img').getAttribute('src'), imageData);
+  assert.equal(reused.querySelector('img').getAttribute('src'), imageData);
+  assert.equal(reused.querySelector('img').alt, 'Reused');
+  assert.match(reused.querySelector('.ge-unavailable-image').textContent, /URL only/);
+  assert.equal(unrelated.querySelector('img'), null);
+
+  shared.mimeType = 'image/jpeg';
+  api.refreshRichAssets(container, conversation, [shared.id]);
+  assert.equal(owner.querySelector('img'), null);
+  assert.equal(reused.querySelector('img'), null);
+});
