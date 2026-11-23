@@ -12,6 +12,20 @@
 
 **1.1 新增**：完整对话树与分支选择、共享/临时对话读取、图片与原始附件嵌入、KaTeX 公式、Mermaid，以及直接在浏览器内生成 PDF。支持 Markdown、TXT、HTML、JSON、CSV；系统打印作为备用入口。实现与限制见 [1.1 升级说明](docs/upgrade-1.1.md)。
 
+## 功能展示
+
+**对话选择与公式预览**
+
+![对话选择与公式预览](docs/screenshots/reader-math.png)
+
+**对话中的图片预览**
+
+![对话中的图片预览](docs/screenshots/reader-images.png)
+
+**导出设置**
+
+![导出设置](docs/screenshots/export-settings.png)
+
 ## 安装源码
 
 1. 用 Git 获取本仓库：`git clone https://github.com/loeness/GptExporter.git`。
