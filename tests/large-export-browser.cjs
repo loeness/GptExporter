@@ -201,8 +201,11 @@ async function run() {
     }
     const readerPath = path.join(output, 'reader.pdf');
     const readerPdfStarted = performance.now();
-    const readerDownloadPromise = reader.waitForEvent('download', { timeout });
     await reader.locator('[data-format="pdf"]').click();
+    await reader.locator('#pdf-preview-dialog').waitFor({ state: 'visible', timeout });
+    await reader.waitForFunction(() => document.querySelector('#pdf-preview-frame')?.src.startsWith('blob:'), null, { timeout });
+    const readerDownloadPromise = reader.waitForEvent('download', { timeout });
+    await reader.locator('#pdf-preview-download').click();
     await (await readerDownloadPromise).saveAs(readerPath);
     const readerPdfMs = Math.round(performance.now() - readerPdfStarted);
     const readerPdf = inspectPdf(readerPath);

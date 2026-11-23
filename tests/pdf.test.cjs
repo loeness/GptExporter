@@ -221,6 +221,65 @@ test('keeps a short inline TeX image between its surrounding text and blocks a t
   assert.ok(definition.content.some((node) => node && node.text && JSON.stringify(node.text).includes('后续说明')));
 });
 
+test('wraps a long math paragraph while retaining styled text on the formula line', () => {
+  const before = 'Long explanatory text that wraps across several lines. '.repeat(9);
+  const after = ' and continues on several more lines of text.'.repeat(10);
+  const container = makeContainer(`<article data-message-id="selected"><p>${before}<strong>variable</strong>
+    <img class="ge-inline-math" alt="TeX: X_1" width="20" height="12" src="${png}"><a href="https://example.com">linked explanation</a>${after}</p></article>`);
+  // Keep the HTML whitespace between the word and the formula on one logical line.
+  container.querySelector('strong').nextSibling.nodeValue = ' ';
+  const { content } = api.pdfDefinition({ container, messages: [selectedMessage], fontSize: 10, density: 'compact', conversationOnly: true });
+  const formulaIndex = content.findIndex((node) => node.table?.body[0].some((cell) => cell.image === png));
+  assert.ok(formulaIndex > 0 && formulaIndex < content.length - 1);
+  const cells = content[formulaIndex].table.body[0];
+  assert.equal(cells[0].text.find((run) => run.bold).text, 'variable');
+  assert.equal(cells[1].image, png);
+  assert.equal(cells[2].text.find((run) => run.link).link, 'https://example.com/');
+  const rowText = (node) => node.table ? node.table.body[0].filter((part) => part.text).flatMap((part) => part.text) : node.text;
+  const allText = content.flatMap(rowText).map((run) => typeof run === 'string' ? run : run.text).join('');
+  assert.equal(allText, `${before}variable linked explanation${after}`);
+});
+
+test('scales PDF typography and formula dimensions and reduces compact gaps', () => {
+  const container = makeContainer(`<article data-message-id="selected"><h2>Assistant</h2><h3>Heading</h3>
+    <p>Words <code>inline</code> around <img class="ge-inline-math" alt="TeX: x" width="20" height="12" src="${png}"> formula.</p>
+    <pre>    source code</pre><img class="ge-snapshot-image" alt="TeX: display" width="80" height="30" src="${png}"></article>`);
+  const definition = (density, fontSize) => api.pdfDefinition({ container, messages: [selectedMessage], density, fontSize, conversationOnly: true });
+  const compact = definition('compact', 8);
+  const standard = definition('standard', 8);
+  const roomy = definition('roomy', 13);
+  for (const style of ['paragraph', 'heading3', 'codeBlock']) assert.ok(compact.styles[style].fontSize < roomy.styles[style].fontSize);
+  assert.ok(compact.styles.paragraph.lineHeight < standard.styles.paragraph.lineHeight);
+  assert.ok(compact.styles.codeBlock.lineHeight < standard.styles.codeBlock.lineHeight);
+  assert.ok(compact.pageMargins.every((value, index) => value < standard.pageMargins[index]));
+  const display = (definition) => definition.content.find((node) => node.image === png);
+  const inline = (definition) => definition.content.find((node) => node.table).table.body[0].find((cell) => cell.image);
+  assert.ok(display(compact).width < display(roomy).width);
+  assert.ok(inline(compact).width < inline(roomy).width);
+  assert.ok(display(compact).margin[3] < display(standard).margin[3]);
+  assert.ok(compact.content.find((node) => node.table).margin[3] < standard.content.find((node) => node.table).margin[3]);
+  assert.match(compact.content.find((node) => node.style === 'codeBlock').text, /^ {4}source code/);
+});
+
+test('omits conversation chrome and notices while retaining user content and embedded files', () => {
+  const container = makeContainer(`<header><h1>Export title</h1></header><article data-message-id="selected" data-role="user">
+    <h2>User <time>Export timestamp</time></h2><p class="branch-affiliations">Export branch</p>
+    <div class="message-body"><p>Original text <time>Its own date</time></p><pre>Original code</pre>
+    <div class="ge-attachments"><p>Attachment notice</p></div></div></article>`);
+  const conversation = {
+    title: 'Export title', url: 'https://example.com/private', exportedAt: 'Export date',
+    assets: [{ kind: 'attachment', messageId: 'selected', status: 'ready', name: 'data.txt', mimeType: 'text/plain', dataUrl: 'data:text/plain;base64,SGk=' }]
+  };
+  const definition = api.pdfDefinition({ container, conversation, messages: [selectedMessage], includeMetadata: true, conversationOnly: true });
+  const rendered = JSON.stringify(definition.content);
+  assert.doesNotMatch(JSON.stringify(definition), /Export title|example\.com\/private|Export date|Export timestamp|Export branch|Attachment notice/);
+  assert.match(rendered, /Original text/);
+  assert.match(rendered, /Its own date/);
+  assert.match(rendered, /Original code/);
+  assert.equal(Object.values(definition.files)[0].name, 'data.txt');
+  assert.ok(container.querySelector('header'));
+});
+
 test('finds JPEG dimensions after a long metadata segment and limits tall images to the page', () => {
   const metadataLength = 0xff00;
   const bytes = Buffer.alloc(4 + metadataLength + 12);
@@ -312,6 +371,8 @@ test('generates bytes with pdfmake getBuffer after registering the local CJK fon
   });
   assert.equal(calls.getBuffer, true);
   assert.equal(calls.definition.defaultStyle.font, 'GptExporterNotoSansCJKsc');
+  assert.equal(calls.definition.defaultStyle.fontSize, 9);
+  assert.deepEqual(calls.definition.pageMargins, [32, 32, 32, 32]);
 });
 
 test('bounds PDF raster conversions, shares repeated images, and substitutes unreadable images', async (context) => {

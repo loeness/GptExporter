@@ -10,7 +10,7 @@
   → reader.html 分支与消息选择 → 本地 Markdown / KaTeX / Mermaid
   → 预览和导出按需读取媒体 → 源标签页解析地址 → background 校验、并行读取、压缩大图
   → exporters.js → Markdown / TXT / HTML / JSON / CSV
-  → 公式/图表向量快照 → pdf.js + pdfmake + 本地 Noto 字体 → PDF
+  → 保留正文、公式和上传图片的快照 → pdf.js + pdfmake + 本地 Noto 字体 → PDF
 
 右侧快捷菜单 → background.js 按当前分支与角色筛选
   → 当前选择直接交给 offscreen direct-export.html 本地渲染
@@ -31,7 +31,9 @@ Claude / Qwen / DeepSeek / Kimi / Gemini / 豆包 / Grok
 
 HTML 在解析、渲染和快照导出时清理。预览自动读取当前选择的图片，文件附件在用户导出或点击嵌入时读取。服务工作线程处理后的媒体保留在 reader 或 offscreen 文档内存中。预览每批只更新对应图片和附件，不重绘整篇对话。没有不受限的 URL 抓取接口。导出器不把消息或 Mermaid 指令当作操作授权。
 
-PDF 由本地 pdfmake 生成，正文使用内嵌 NotoSansCJK Unicode 字体；列表、表格、代码、分页和附件使用语义结构。预览公式使用 KaTeX。导出时先统一测量公式布局，再使用本地 MathJax 的自含 SVG 字形绘制公式；同次导出会复用同一个公式在相同布局下的位图。Mermaid 净化后本地栅格化。HTML/PDF 的公式与图表是图片，原始源码保留在 Markdown/JSON。系统打印是备用路径。预览内通过链接保存 Blob；快捷导出通过 downloads API 保存，原对话标签页保持不变。
+PDF 由本地 pdfmake 生成，正文使用内嵌 NotoSansCJK Unicode 字体。PDF 快照保留用户和助手的内容并过滤导出元数据、生成图表、引用与内部信息。快照准备时先统一测量公式布局，再使用本地 MathJax 绘制，同次导出会复用相同布局下的公式位图。HTML 保留已净化的 Mermaid 图表与公式图片，Markdown/JSON 保留源码。
+
+PDF 分页预览使用 Chromium 的本地 PDF 查看器。调整字号、紧凑度、纸张或方向时复用当前快照，重新排版后替换 PDF Blob。下载保存当前预览的同一份 PDF。快捷导出使用相同过滤与默认排版，直接通过 downloads API 保存。
 
 快捷导出使用 Chrome 的 [Offscreen API](https://developer.chrome.com/docs/extensions/reference/api/offscreen) 与 [Downloads API](https://developer.chrome.com/docs/extensions/reference/api/downloads)。服务工作线程直接向临时文档发送当前选择，并只为正在执行的导出保留媒体索引。快捷导出可与打开预览并行，同时只允许一个快捷任务。生成文件限时 240 秒，下载等待 90 秒，成功或失败后都会释放临时文档。
 

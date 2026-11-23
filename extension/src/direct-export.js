@@ -55,7 +55,7 @@
     assertCurrent(context);
   }
 
-  async function renderRichStage(context, model) {
+  async function renderRichStage(context, model, format) {
     const api = root.GptExporter;
     if (!api || typeof api.renderHtmlFragment !== 'function' || typeof api.enhanceRichContent !== 'function' ||
         typeof api.snapshotRichContent !== 'function') {
@@ -63,8 +63,9 @@
     }
 
     const stage = root.document.createElement('div');
-    stage.innerHTML = api.renderHtmlFragment(model, {includeMetadata: true, messages: model.messages,
-      includeConversationLink:context.settings.includeConversationLink, includeMessageTimestamp:context.settings.includeMessageTimestamp,
+    const isPdf = format === 'pdf';
+    stage.innerHTML = api.renderHtmlFragment(model, {includeMetadata: !isPdf, messages: model.messages,
+      includeConversationLink:context.settings.includeConversationLink, includeMessageTimestamp:!isPdf && context.settings.includeMessageTimestamp,
       dateFormat:context.settings.dateFormat, timeFormat:context.settings.timeFormat});
     content.replaceChildren(stage);
     context.model = model;
@@ -75,6 +76,7 @@
     assertCurrent(context);
     await reportPhase(context,'snapshot');
     return api.snapshotRichContent(content, {
+      purpose: format,
       onProgress: (progress) => {
         if (!context.released) void reportPhase(context, 'snapshot', progress).catch(() => {});
       }
@@ -95,7 +97,7 @@
       await reportPhase(context,'assets');
       if (assets.length && typeof api.loadConversationAssets === 'function') await api.loadConversationAssets(model);
       assertCurrent(context);
-      const snapshot = await renderRichStage(context, model);
+      const snapshot = await renderRichStage(context, model, format);
       assertCurrent(context);
       if (!snapshot || typeof snapshot.cloneNode !== 'function') throw new Error('富内容快照生成失败。');
       if (format === 'pdf') {
@@ -106,9 +108,8 @@
           consumeContainer: true,
           conversation: model,
           messages,
-          includeMetadata: true,
-          includeConversationLink: context.settings.includeConversationLink,
-          includeMessageTimestamp: context.settings.includeMessageTimestamp,
+          includeMetadata: false,
+          conversationOnly: true,
           pageSize: 'A4',
           orientation: 'portrait'
         });

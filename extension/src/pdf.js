@@ -8,6 +8,12 @@
   const PAGE_WIDTH = { A4: 595.28, LETTER: 612 };
   const PAGE_HEIGHT = { A4: 841.89, LETTER: 792 };
   const MARGINS = [48, 46, 48, 46];
+  const PDF_DENSITIES = {
+    compact: { margins: [32, 32, 32, 32], lineHeight: 1.12, paragraphLineHeight: 1.12, codeLineHeight: 1.05, spacing: 0.55 },
+    standard: { margins: MARGINS, lineHeight: 1.25, paragraphLineHeight: 1.3, codeLineHeight: 1.15, spacing: 1 },
+    roomy: { margins: [56, 54, 56, 54], lineHeight: 1.4, paragraphLineHeight: 1.45, codeLineHeight: 1.3, spacing: 1.35 }
+  };
+  const CONVERSATION_CHROME = 'header:not(.message-body header), article > h2 > time, .branch-affiliations, .ge-attachments, .ge-attachment-card, [data-ge-attachment]';
   const JPEG_FRAME_MARKERS = new Set([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf]);
   const MAX_RASTER_EDGE = 2400;
   const MAX_RASTER_PIXELS = 4000000;
@@ -81,7 +87,7 @@
         return alt ? [{ text: alt, ...inherited }] : [];
       }
 
-      const style = inlineStyleFor(tag, inherited, current);
+      const style = inlineStyleFor(tag, inherited, current, settings.fontSize);
 
       const output = [];
       for (const child of Array.from(current.childNodes || [])) output.push(...visit(child, style));
@@ -104,13 +110,13 @@
     return '';
   }
 
-  function inlineStyleFor(tag, inherited, node) {
+  function inlineStyleFor(tag, inherited, node, fontSize = 10) {
     if (tag === 'strong' || tag === 'b') return Object.assign({}, inherited, { bold: true });
     if (tag === 'em' || tag === 'i') return Object.assign({}, inherited, { italics: true });
     if (tag === 'del' || tag === 's') return Object.assign({}, inherited, { decoration: 'lineThrough' });
-    if (tag === 'code') return Object.assign({}, inherited, { font: FONT_FAMILY, fontSize: 8.5, color: '#8d3b3b' });
-    if (tag === 'sup') return Object.assign({}, inherited, { sup: true, fontSize: 8 });
-    if (tag === 'sub') return Object.assign({}, inherited, { sub: true, fontSize: 8 });
+    if (tag === 'code') return Object.assign({}, inherited, { font: FONT_FAMILY, fontSize: fontSize - 1.5, color: '#8d3b3b' });
+    if (tag === 'sup') return Object.assign({}, inherited, { sup: true, fontSize: fontSize - 2 });
+    if (tag === 'sub') return Object.assign({}, inherited, { sub: true, fontSize: fontSize - 2 });
     if (tag === 'a') {
       const href = safePdfLink(node && node.getAttribute('href'));
       return href ? Object.assign({}, inherited, { link: href, color: '#52786a', decoration: 'underline' }) : inherited;
@@ -177,7 +183,7 @@
     });
   }
 
-  function buildTable(table, maxWidth) {
+  function buildTable(table, maxWidth, typography) {
     const rows = directRows(table);
     if (!rows.length) return null;
     const cellRows = rows.map(directCells);
@@ -185,16 +191,18 @@
       const span = Number.parseInt(cell.getAttribute('colspan') || '1', 10);
       return count + (Number.isSafeInteger(span) ? Math.max(1, Math.min(16, span)) : 1);
     }, 0)));
+    const fontSize = typography.fontSize - 1.5;
+    const cellMargin = typography.margin(4, 3, 4, 3);
     const body = cellRows.map((cells) => {
       const output = [];
       for (const cell of cells) {
         const parsedSpan = Number.parseInt(cell.getAttribute('colspan') || '1', 10);
         const span = Number.isSafeInteger(parsedSpan) ? Math.max(1, Math.min(columnCount, parsedSpan)) : 1;
-        const maxTokenCharacters = Math.max(1, Math.floor((maxWidth / columnCount - 12) / 8.5));
+        const maxTokenCharacters = Math.max(1, Math.floor((maxWidth / columnCount - 12) / fontSize));
         const cellDefinition = {
-          text: wrapLongTokens(inlineText(cell), maxTokenCharacters),
-          margin: [4, 3, 4, 3],
-          fontSize: 8.5,
+          text: wrapLongTokens(inlineText(cell, typography), maxTokenCharacters),
+          margin: cellMargin,
+          fontSize,
           valign: 'top'
         };
         if (String(cell.localName || '').toLowerCase() === 'th') {
@@ -205,7 +213,7 @@
         output.push(cellDefinition);
         for (let index = 1; index < span; index += 1) output.push('');
       }
-      while (output.length < columnCount) output.push({ text: '', margin: [4, 3, 4, 3] });
+      while (output.length < columnCount) output.push({ text: '', margin: cellMargin });
       return output.slice(0, columnCount);
     });
     let headerRows = 0;
@@ -224,8 +232,8 @@
         dontBreakRows: false
       },
       layout: 'lightHorizontalLines',
-      fontSize: 8.5,
-      margin: [0, 5, 0, 9]
+      fontSize,
+      margin: typography.margin(0, 5, 0, 9)
     };
     return definition;
   }
@@ -393,25 +401,28 @@
     return info;
   }
 
-  function renderImage(image, maxWidth, maxHeight, imageInfo, imageName) {
+  function renderImage(image, maxWidth, maxHeight, imageInfo, imageName, typography) {
     const source = imageInfo || null;
     const size = imageDisplaySize(image, source && source.dimensions, maxWidth, maxHeight);
-    if (!size) return imageFallback(image);
+    if (!size) return { ...imageFallback(image), margin: typography.margin(0, 3, 0, 7) };
+    const width = image.classList.contains('ge-snapshot-image') && /^TeX:/.test(image.getAttribute('alt') || '')
+      ? Math.min(maxWidth, maxHeight * size.width / size.height, size.width * typography.fontSize / 10)
+      : size.width;
     return {
       image: imageName(source.dataUrl),
-      width: size.width,
+      width,
       maxHeight,
       alignment: 'center',
-      margin: [0, 5, 0, 9]
+      margin: typography.margin(0, 5, 0, 9)
     };
   }
 
-  function estimatedTextWidth(runs) {
+  function estimatedTextWidth(runs, baseFontSize) {
     let width = 0;
     for (const run of runs) {
       const text = typeof run === 'string' ? run : cleanText(run && run.text || '');
       if (text.includes('\n')) return Infinity;
-      const fontSize = Number(run && typeof run === 'object' && run.fontSize) || 10;
+      const fontSize = Number(run && typeof run === 'object' && run.fontSize) || baseFontSize;
       for (const character of Array.from(text)) {
         const codePoint = character.codePointAt(0);
         if (/\s/.test(character)) width += fontSize * 0.3;
@@ -425,30 +436,108 @@
     return width * 1.2;
   }
 
-  function inlineMathTable(parts) {
+  function inlineMathTable(parts, typography) {
     const cells = [];
     const widths = [];
     for (const part of parts) {
       if (part.type === 'text') {
-        cells.push({ text: part.runs, margin: [0, 0, 0, 0], valign: 'middle' });
+        cells.push({ text: part.runs, style: 'paragraph', valign: 'middle' });
         widths.push('auto');
       } else {
-        cells.push({ image: part.definition.image, width: part.definition.width, alignment: 'center', margin: [0, 2, 0, 0], valign: 'middle' });
+        cells.push({ image: part.definition.image, width: part.definition.width, alignment: 'center', margin: typography.margin(0, 2, 0, 0), valign: 'middle' });
         widths.push(part.definition.width);
       }
     }
     return {
       table: { widths, body: [cells] },
       layout: 'noBorders',
-      margin: [0, 0, 0, 7]
+      margin: [0, 0, 0, 0]
     };
   }
 
-  function paragraphBlocks(paragraph, maxWidth, maxHeight, imageInfo, imageName) {
+  function wrapInlineMath(parts, maxWidth, typography) {
+    const lines = [];
+    let row = [];
+    let rowWidth = 0;
+    const finishLine = () => {
+      const cells = [];
+      let previousSource;
+      for (const token of row) {
+        if (token.type === 'math') {
+          cells.push(token);
+          continue;
+        }
+        const lastCell = cells[cells.length - 1];
+        const run = typeof token.source === 'string' ? token.text : { ...token.source, text: token.text };
+        if (!lastCell || lastCell.type !== 'text') cells.push({ type: 'text', runs: [run] });
+        else if (token.source === previousSource) {
+          const index = lastCell.runs.length - 1;
+          const previous = lastCell.runs[index];
+          lastCell.runs[index] = typeof previous === 'string' ? previous + token.text : { ...previous, text: previous.text + token.text };
+        } else lastCell.runs.push(run);
+        previousSource = token.source;
+      }
+      if (cells.some((cell) => cell.type === 'math')) lines.push(inlineMathTable(cells, typography));
+      else lines.push({ text: cells.length ? cells[0].runs : ' ', style: 'paragraph' });
+      row = [];
+      rowWidth = 0;
+    };
+    // pdfmake's noBorders layout leaves horizontal padding between cells.
+    const cellGap = (last, next) => last && (last.type !== 'text' || next.type !== 'text') ? 8 : 0;
+    const place = (token) => {
+      if (row.length && rowWidth + token.width + cellGap(row[row.length - 1], token) > maxWidth - 8) {
+        let carry = [];
+        if (token.type === 'math') {
+          let index = row.length - 1;
+          while (index >= 0 && row[index].type === 'text' && /^\s+$/.test(row[index].text)) index -= 1;
+          if (index > 0 && row[index].type === 'text') {
+            const nearbyWidth = row.slice(index).reduce((width, item) => width + item.width, 0);
+            if (nearbyWidth + token.width + 8 <= maxWidth - 8) carry = row.splice(index);
+          }
+        }
+        finishLine();
+        row = carry;
+        rowWidth = carry.reduce((width, item) => width + item.width, 0);
+      }
+      rowWidth += token.width + cellGap(row[row.length - 1], token);
+      row.push(token);
+    };
+    for (const part of parts) {
+      if (part.type === 'math') {
+        place({ ...part, width: part.definition.width });
+        continue;
+      }
+      for (const run of part.runs) {
+        const value = typeof run === 'string' ? run : run.text;
+        const tokens = value.match(/\n|[^\S\n]+|[\u2e80-\uffff]|[^\s\u2e80-\uffff]+/gu) || [];
+        for (const token of tokens) {
+          if (token === '\n') {
+            finishLine();
+            continue;
+          }
+          const textToken = (text) => ({
+            type: 'text', text, source: run,
+            width: estimatedTextWidth([typeof run === 'string' ? text : { ...run, text }], typography.fontSize)
+          });
+          const entry = textToken(token);
+          if (entry.width <= maxWidth - 16) place(entry);
+          else {
+            for (const character of token) place(textToken(character));
+          }
+        }
+      }
+    }
+    if (row.length) finishLine();
+    if (lines.length) lines[lines.length - 1].margin = typography.margin(0, 0, 0, 7);
+    return lines;
+  }
+
+  function paragraphBlocks(paragraph, maxWidth, maxHeight, imageInfo, imageName, typography) {
     const output = [];
     let runs = [];
     let inlineParts = [];
-    const inlineMathMaxHeight = 1.8 * 10 * 1.3;
+    const naturalInlineMathHeight = 1.8 * 10 * 1.3;
+    const inlineMathMaxHeight = naturalInlineMathHeight * typography.fontSize / 10;
     const flushRuns = () => {
       if (runs.length) inlineParts.push({ type: 'text', runs });
       runs = [];
@@ -458,15 +547,12 @@
       const mathParts = inlineParts.filter((part) => part.type === 'math');
       const textParts = inlineParts.filter((part) => part.type === 'text');
       const hasNeighboringText = textParts.some((part) => part.runs.some((run) => String(typeof run === 'string' ? run : run.text || '').trim()));
-      const allOneLine = textParts.every((part) => part.runs.every((run) => !String(typeof run === 'string' ? run : run.text || '').includes('\n')));
-      const estimatedWidth = textParts.reduce((total, part) => total + estimatedTextWidth(part.runs), 0) +
-        mathParts.reduce((total, part) => total + part.definition.width + 3, 0);
-      if (mathParts.length && hasNeighboringText && allOneLine && estimatedWidth <= maxWidth - 12) {
-        output.push(inlineMathTable(inlineParts));
+      if (mathParts.length && hasNeighboringText) {
+        output.push(...wrapInlineMath(inlineParts, maxWidth, typography));
       } else {
         let textRuns = [];
         const flushText = () => {
-          if (textRuns.length) output.push({ text: wrapLongTokens(textRuns, Math.max(10, Math.floor(maxWidth / 11.5))), style: 'paragraph', margin: [0, 0, 0, 7] });
+          if (textRuns.length) output.push({ text: wrapLongTokens(textRuns, Math.max(10, Math.floor(maxWidth / (typography.fontSize * 1.15)))), style: 'paragraph', margin: typography.margin(0, 0, 0, 7) });
           textRuns = [];
         };
         for (const part of inlineParts) {
@@ -494,18 +580,18 @@
         flushRuns();
         const source = imageInfo(node.getAttribute('src'));
         const size = imageDisplaySize(node, source && source.dimensions, maxWidth, maxHeight);
-        const explicitlyInline = node.classList && node.classList.contains('ge-inline-math');
+        const explicitlyInline = node.classList.contains('ge-inline-math');
+        const legacyInline = !node.classList.contains('ge-snapshot-image');
         const isInlineMath = /^TeX:/.test(cleanText(node.getAttribute('alt') || '')) && size &&
-          (size.height <= inlineMathMaxHeight || (explicitlyInline && size.height <= inlineMathMaxHeight * 2));
+          ((legacyInline && size.height <= naturalInlineMathHeight) ||
+            (explicitlyInline && size.height <= naturalInlineMathHeight * 2));
         if (isInlineMath) {
-          const definition = renderImage(node, maxWidth, maxHeight, source, imageName);
-          if (explicitlyInline && size.height > inlineMathMaxHeight && definition.width) {
-            definition.width = Math.max(0.75, Math.round(definition.width * inlineMathMaxHeight / size.height * 100) / 100);
-          }
+          const definition = renderImage(node, maxWidth, maxHeight, source, imageName, typography);
+          definition.width = Math.min(size.width * typography.fontSize / 10, size.width * inlineMathMaxHeight / size.height, maxWidth - 16);
           inlineParts.push({ type: 'math', definition });
         } else {
           flushInlineParts();
-          output.push(renderImage(node, maxWidth, maxHeight, source, imageName));
+          output.push(renderImage(node, maxWidth, maxHeight, source, imageName, typography));
         }
         return;
       }
@@ -513,7 +599,7 @@
         runs.push({ text: '\n', ...style });
         return;
       }
-      const childStyle = inlineStyleFor(tag, style, node);
+      const childStyle = inlineStyleFor(tag, style, node, typography.fontSize);
       for (const child of Array.from(node.childNodes || [])) visit(child, childStyle);
     };
     for (const child of Array.from(paragraph.childNodes || [])) visit(child, {});
@@ -528,17 +614,32 @@
     const selectedMessages = Array.isArray(settings.messages) ? settings.messages : (Array.isArray(conversation.messages) ? conversation.messages : []);
     if (!selectedMessages.length) throw new TypeError('请至少选择一条消息后再生成 PDF。');
     const selectedIds = new Set(selectedMessages.map((message) => message && message.id != null ? String(message.id) : '').filter(Boolean));
-    const container = settings.container;
+    const conversationOnly = settings.conversationOnly === true;
+    let container = settings.container;
     if (!container || container.nodeType !== 1) throw new TypeError('PDF 内容容器无效或尚未完成渲染。');
+    if (conversationOnly && container.querySelector(CONVERSATION_CHROME)) {
+      container = container.cloneNode(true);
+      container.querySelectorAll(CONVERSATION_CHROME).forEach((node) => node.remove());
+    }
 
     const requestedPageSize = settings.pageSize == null ? 'A4' : String(settings.pageSize).toUpperCase();
     if (!Object.prototype.hasOwnProperty.call(PAGE_WIDTH, requestedPageSize)) throw new TypeError('PDF 纸张规格仅支持 A4 或 LETTER。');
     const orientation = settings.orientation == null ? 'portrait' : String(settings.orientation).toLowerCase();
     if (orientation !== 'portrait' && orientation !== 'landscape') throw new TypeError('PDF 页面方向仅支持 portrait 或 landscape。');
-    const includeMetadata = settings.includeMetadata !== false;
-    const width = pageWidth(requestedPageSize, orientation) - MARGINS[0] - MARGINS[2];
-    const maxHeight = (orientation === 'landscape' ? PAGE_WIDTH[requestedPageSize] : PAGE_HEIGHT[requestedPageSize]) - MARGINS[1] - MARGINS[3] - 80;
-    const attachments = collectAttachments(conversation, selectedIds);
+    const includeMetadata = !conversationOnly && settings.includeMetadata !== false;
+    const modernLayout = conversationOnly || settings.fontSize != null || settings.density != null;
+    const fontSize = Number.isInteger(settings.fontSize) && settings.fontSize >= 8 && settings.fontSize <= 13
+      ? settings.fontSize : modernLayout ? 9 : 10;
+    const density = Object.prototype.hasOwnProperty.call(PDF_DENSITIES, settings.density)
+      ? PDF_DENSITIES[settings.density] : PDF_DENSITIES[modernLayout ? 'compact' : 'standard'];
+    const typography = {
+      fontSize,
+      margin: (left, top, right, bottom) => [left, top * density.spacing, right, bottom * density.spacing]
+    };
+    const margin = typography.margin;
+    const [left, top, right, bottom] = density.margins;
+    const width = pageWidth(requestedPageSize, orientation) - left - right;
+    const maxHeight = (orientation === 'landscape' ? PAGE_WIDTH[requestedPageSize] : PAGE_HEIGHT[requestedPageSize]) - top - bottom - 80;
     const images = {};
     const imageNames = new Map();
     const imageInfo = (value) => getImageInfo(value, imageCache);
@@ -554,11 +655,17 @@
     let renderedArticleCount = 0;
     const articleElements = Array.from(container.querySelectorAll ? container.querySelectorAll('article') : []);
     const articleIds = new Set(articleElements.map((article) => article.getAttribute('data-message-id')).filter(Boolean));
+    const userIds = new Set(selectedMessages.filter((message) => message?.role === 'user').map((message) => String(message.id)));
+    for (const article of articleElements) {
+      const id = article.getAttribute('data-message-id');
+      if (selectedIds.has(id) && article.getAttribute('data-role') === 'user') userIds.add(id);
+    }
+    const attachments = collectAttachments(conversation, conversationOnly ? userIds : selectedIds);
     const hasTaggedArticles = articleIds.size > 0;
     let previousArticleRole = '';
 
     const roleAvatar = (role, repeated) => {
-      const scale = repeated ? 0.78 : 1;
+      const scale = (repeated ? 0.78 : 1) * (density === PDF_DENSITIES.compact ? 0.75 : 1);
       const size = 22 * scale;
       const center = size / 2;
       const radius = size / 2 - scale;
@@ -611,7 +718,7 @@
       if (!node) return [];
       if (node.nodeType === 3) {
         const value = cleanText(node.nodeValue || '').trim();
-        return value ? [{ text: value, style: 'paragraph', margin: [0, 0, 0, 5] }] : [];
+        return value ? [{ text: value, style: 'paragraph', margin: margin(0, 0, 0, 5) }] : [];
       }
       if (node.nodeType !== 1) return [];
       const tag = String(node.localName || '').toLowerCase();
@@ -620,10 +727,10 @@
         const label = tag === 'math' ? textOf(node) : '';
         return [{ text: label ? `[未转换的公式：${label}]` : `[未转换的${tag === 'svg' ? '矢量图' : tag === 'math' ? '公式' : tag === 'canvas' ? '画布图像' : '媒体'}]`, style: 'resourceFallback', margin: [0, 3, 0, 7] }];
       }
-      if (tag === 'img') return [renderImage(node, width, maxHeight, imageInfo(node.getAttribute('src')), imageName)];
+      if (tag === 'img') return [renderImage(node, width, maxHeight, imageInfo(node.getAttribute('src')), imageName, typography)];
 
       if (tag === 'header') {
-        if (!includeMetadata) return [];
+        if (!includeMetadata && !conversationOnly) return [];
         return renderFlowChildren(node, context);
       }
       if (tag === 'article') {
@@ -642,7 +749,7 @@
           repeatedRole
         }));
         const linkedAssets = attachments.byMessage.get(id || '');
-        blocks.push(...attachmentContent(linkedAssets));
+        if (!conversationOnly) blocks.push(...attachmentContent(linkedAssets));
         if (messageRole === 'user') blocks = blocks.map((block) => alignPdfBlock(block, 'right'));
         return blocks;
       }
@@ -662,25 +769,25 @@
           return [{
             columns: role === 'user' ? [textColumn, avatarColumn] : [avatarColumn, textColumn],
             columnGap: 5,
-            margin: context.repeatedRole ? [0, 3, 0, 2] : [0, 6, 0, 4]
+            margin: context.repeatedRole ? margin(0, 3, 0, 2) : margin(0, 6, 0, 4)
           }];
         }
         const level = Number(tag.slice(1));
         const isDocumentTitle = tag === 'h1' && String(node.parentElement && node.parentElement.localName || '').toLowerCase() === 'header';
-        return [{ text: inlineText(node), style: isDocumentTitle ? 'documentTitle' : `heading${level}`, margin: [0, level === 1 ? 3 : 9, 0, level === 1 ? 9 : 4] }];
+        return [{ text: inlineText(node, typography), style: isDocumentTitle ? 'documentTitle' : `heading${level}`, margin: margin(0, level === 1 ? 3 : 9, 0, level === 1 ? 9 : 4) }];
       }
       if (tag === 'p') {
-        return paragraphBlocks(node, width, maxHeight, imageInfo, imageName);
+        return paragraphBlocks(node, width, maxHeight, imageInfo, imageName, typography);
       }
       if (tag === 'pre') {
         const source = node.querySelector && node.querySelector('code') ? node.querySelector('code') : node;
         const code = breakLongCodeLines(textOf(source));
-        return code ? [{ text: code, style: 'codeBlock', margin: [12, 4, 0, 9], preserveLeadingSpaces: true, lineHeight: 1.15 }] : [];
+        return code ? [{ text: code, style: 'codeBlock', margin: margin(12, 4, 0, 9), preserveLeadingSpaces: true }] : [];
       }
       if (tag === 'ul' || tag === 'ol') {
         const items = Array.from(node.children || []).filter((child) => String(child.localName || '').toLowerCase() === 'li');
         if (!items.length) return [];
-        const list = { [tag]: [], margin: [context.listDepth * 12, 3, 0, 7] };
+        const list = { [tag]: [], margin: margin(context.listDepth * 12, 3, 0, 7) };
         if (tag === 'ol') {
           const reversed = node.hasAttribute('reversed');
           const start = integerAttribute(node, 'start');
@@ -702,14 +809,14 @@
         return [list];
       }
       if (tag === 'table') {
-        const table = buildTable(node, width);
+        const table = buildTable(node, width, typography);
         return table ? [table] : [{ text: '[表格没有可导出的行]', style: 'resourceFallback' }];
       }
       if (tag === 'blockquote') {
         const blocks = renderFlowChildren(node, context);
         return blocks.map((block) => {
-          if (typeof block === 'string') return { text: block, style: 'quote', margin: [16, 2, 0, 4] };
-          if (block && block.text) return Object.assign({}, block, { color: '#56665e', italics: true, margin: [16, 2, 0, 5] });
+          if (typeof block === 'string') return { text: block, style: 'quote', margin: margin(16, 2, 0, 4) };
+          if (block && block.text) return Object.assign({}, block, { color: '#56665e', italics: true, margin: margin(16, 2, 0, 5) });
           return block;
         });
       }
@@ -759,7 +866,7 @@
         if (visible) {
           const wrapper = parent.ownerDocument.createElement('span');
           inlineNodes.forEach((node) => wrapper.appendChild(node.cloneNode(true)));
-          output.push(...paragraphBlocks(wrapper, width, maxHeight, imageInfo, imageName));
+          output.push(...paragraphBlocks(wrapper, width, maxHeight, imageInfo, imageName, typography));
         }
         inlineNodes = [];
       };
@@ -786,12 +893,12 @@
     }
     content.push(...renderFlowChildren(container, { listDepth: 0 }));
 
-    if (!renderedArticleCount && !articleElements.length) {
+    if (!conversationOnly && !renderedArticleCount && !articleElements.length) {
       const fallbackText = textOf(container).trim();
       if (fallbackText) content.push({ text: fallbackText, style: 'paragraph' });
     }
     for (const [messageId, items] of attachments.byMessage) {
-      if (selectedIds.has(messageId) && !articleIds.has(messageId)) content.push(...attachmentContent(items));
+      if (!conversationOnly && selectedIds.has(messageId) && !articleIds.has(messageId)) content.push(...attachmentContent(items));
     }
     if (!content.length || (!renderedArticleCount && !textOf(container).trim() && !Object.keys(attachments.files).length)) {
       throw new TypeError('PDF 内容为空。请确认所选消息已完成渲染后重试。');
@@ -800,27 +907,27 @@
     const definition = {
       pageSize: requestedPageSize,
       pageOrientation: orientation,
-      pageMargins: MARGINS.slice(),
+      pageMargins: density.margins.slice(),
       info: {
-        title: cleanText(conversation.title || 'ChatGPT conversation'),
+        title: cleanText((!conversationOnly && conversation.title) || 'AI Conversation Export'),
         subject: 'Conversation export',
         creator: 'GptExporter'
       },
-      defaultStyle: { font: FONT_FAMILY, fontSize: 10, color: '#27312d', lineHeight: 1.25 },
+      defaultStyle: { font: FONT_FAMILY, fontSize, color: '#27312d', lineHeight: density.lineHeight },
       styles: {
-        documentTitle: { fontSize: 20, bold: true, color: '#263c33', margin: [0, 0, 0, 7] },
-        paragraph: { fontSize: 10, lineHeight: 1.3 },
+        documentTitle: { fontSize: fontSize + 10, bold: true, color: '#263c33', margin: margin(0, 0, 0, 7) },
+        paragraph: { fontSize, lineHeight: density.paragraphLineHeight },
         roleHeaderUser: { fontSize: 8, bold: true, color: '#617b8a', characterSpacing: 0.3 },
         roleHeaderAssistant: { fontSize: 8, bold: true, color: '#4e7865', characterSpacing: 0.3 },
         roleHeader: { fontSize: 8, bold: true, color: '#66736c', characterSpacing: 0.3 },
         roleHeaderContinuation: { fontSize: 7.5, bold: true, color: '#87958d' },
-        heading1: { fontSize: 18, bold: true, color: '#263c33' },
-        heading2: { fontSize: 15, bold: true, color: '#30493e' },
-        heading3: { fontSize: 13, bold: true, color: '#3d594d' },
-        heading4: { fontSize: 12, bold: true },
-        heading5: { fontSize: 11, bold: true },
-        heading6: { fontSize: 10, bold: true },
-        codeBlock: { font: FONT_FAMILY, fontSize: 8.5, color: '#39423e', fillColor: '#f2f4f1', lineHeight: 1.15 },
+        heading1: { fontSize: fontSize + 8, bold: true, color: '#263c33' },
+        heading2: { fontSize: fontSize + 5, bold: true, color: '#30493e' },
+        heading3: { fontSize: fontSize + 3, bold: true, color: '#3d594d' },
+        heading4: { fontSize: fontSize + 2, bold: true },
+        heading5: { fontSize: fontSize + 1, bold: true },
+        heading6: { fontSize, bold: true },
+        codeBlock: { font: FONT_FAMILY, fontSize: fontSize - 1.5, color: '#39423e', fillColor: '#f2f4f1', lineHeight: density.codeLineHeight },
         quote: { color: '#56665e', italics: true },
         warning: { fontSize: 8.5, color: '#665f45' },
         attachment: { fontSize: 9, bold: true, color: '#314b40' },
@@ -833,7 +940,7 @@
         font: FONT_FAMILY,
         fontSize: 8,
         color: '#7b8580',
-        margin: [0, 12, 0, 0]
+        margin: margin(0, 12, 0, 0)
       })
     };
     if (imageNames.size) definition.images = images;
@@ -974,7 +1081,7 @@
     const vendors = root.GptExporterVendors;
     const pdfMake = vendors && vendors.pdfMake;
     if (!pdfMake || typeof pdfMake.createPdf !== 'function') throw new Error('本地 PDF 生成组件不可用，请重新加载扩展后重试。');
-    const settings = Object.assign({}, options || {});
+    const settings = Object.assign({ fontSize: 9, density: 'compact' }, options || {});
     const imageCache = new Map();
     if (settings.container && typeof settings.container.cloneNode === 'function') {
       if (settings.consumeContainer !== true) settings.container = settings.container.cloneNode(true);

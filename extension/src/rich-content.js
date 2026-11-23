@@ -697,8 +697,106 @@
     node.replaceWith(image);
   }
 
-  function safeSnapshotClone(container) {
+  const PDF_OMITTED_CONTENT = [
+    'header:not(.message-body header)', 'article > h2 > time', '.branch-affiliations',
+    '.ge-attachments', '.ge-attachment-card', '.ge-unavailable-image', '[data-ge-image-placeholder]',
+    '[data-citation]', '[data-citation-id]', '[data-annotation-type="citation" i]', '.citation-chip', '.source-section',
+    '[data-testid*="citation" i]', '[data-testid*="sources" i]',
+    '[data-testid*="reasoning" i]', '[data-testid*="analysis" i]',
+    '[data-testid*="thinking" i]', '[data-testid*="thought" i]',
+    '[data-testid*="tool-call" i]', '[data-testid*="tool_call" i]', '[data-testid*="tool-result" i]',
+    '[data-message-channel="analysis" i]', '[data-channel="analysis" i]',
+    '[data-message-type="analysis" i]', '[data-message-type="tool" i]',
+    'article[data-role]:not([data-role="user"]):not([data-role="assistant"])'
+  ].join(',');
+  const PDF_DIAGRAM = [
+    '[data-ge-mermaid]', '[data-ge-mermaid-source]', '.ge-mermaid-source-fallback', '.ge-mermaid-error',
+    '.ge-mermaid-diagram', '.mermaid', 'img[alt^="Mermaid diagram: "]',
+    'img[src^="data:image/svg+xml" i]'
+  ].join(',');
+  const SVG_OPEN = /^(?:\s*<\?xml\s[\s\S]*?\?>)?(?:\s*<!DOCTYPE\s+svg\b[^>]*>)?\s*<svg(?=[\s/>])/i;
+  const SVG_CLOSE = /<\/svg\s*>|^\s*<svg\b[^>]*\/\s*>/i;
+  const PDF_ASSET_MARKER = /^\[(?:Attachment|Image): [^\r\n]*\]$/;
+
+  function svgMarkup(text) {
+    return text.replace(/&(?:lt|#0*60|#x0*3c);/gi, '<')
+      .replace(/&(?:gt|#0*62|#x0*3e);/gi, '>');
+  }
+
+  function removeDiagramBlock(element, container) {
+    // Lift an artifact out of an otherwise empty wrapper so its caption can be found.
+    let block = element;
+    while (block.parentElement !== container && block.parentElement?.matches('p, pre, figure, div:not(.message-body)') &&
+           Array.from(block.parentElement.childNodes).every((child) => child === block ||
+             (child.nodeType === 3 && !child.textContent.trim()) || child.localName === 'br')) {
+      block = block.parentElement;
+    }
+    const heading = block.previousElementSibling;
+    const title = heading?.textContent.trim() || '';
+    const boldParagraph = heading?.matches('p') && heading.firstElementChild?.matches('strong, b') &&
+      heading.firstElementChild.textContent.trim() === title;
+    if (heading?.matches('h1, h2, h3, h4, h5, h6, p') &&
+        !heading.matches('article > h2') &&
+        /(?:\b(?:timeline|diagram|mermaid|svg|flowchart)\b|时间线|时间轴|流程图|示意图|图表)/i.test(title) &&
+        (heading.matches('h1, h2, h3, h4, h5, h6') || (boldParagraph && !/[.!?。！？]$/.test(title)) ||
+         /^(?:timeline|diagram|flowchart|时间线|时间轴|流程图|示意图|图表)\s*[:：]?$/i.test(title))) {
+      heading.remove();
+    }
+    block.remove();
+  }
+
+  function filterPdfContent(clone) {
+    for (const element of clone.querySelectorAll(PDF_OMITTED_CONTENT)) element.remove();
+    for (const paragraph of clone.querySelectorAll('.message-body > p')) {
+      // History import appends these markers as plain paragraphs. An image or
+      // other authored inline content may share the same visible wording.
+      if (!paragraph.childElementCount && PDF_ASSET_MARKER.test(paragraph.textContent.trim())) paragraph.remove();
+    }
+    for (const list of clone.querySelectorAll('article[data-role="assistant"] .message-body > :is(ul, ol)')) {
+      const heading = list.previousElementSibling;
+      if (heading?.matches('h1, h2, h3, h4, h5, h6, p') &&
+          /^(?:sources|citations|references|来源|参考资料|参考文献|引用)\s*[:：]?$/i.test(heading.textContent.trim()) &&
+          list.children.length && Array.from(list.children).every((item) => item.querySelector('a[href]'))) {
+        heading.remove();
+        list.remove();
+      }
+    }
+    for (const element of clone.querySelectorAll(`${PDF_DIAGRAM}, svg, pre, p`)) {
+      if (!clone.contains(element) || element.closest('[data-ge-math], .katex, .katex-display')) continue;
+      if (element.matches(`${PDF_DIAGRAM}, svg, pre:has(> code.language-svg), pre:has(> code.language-mermaid)`)) {
+        removeDiagramBlock(element, clone);
+        continue;
+      }
+      const source = svgMarkup(element.textContent);
+      if (!SVG_OPEN.test(source) || element.querySelector('img, table, [data-ge-math]')) continue;
+      if (element.matches('pre') || SVG_CLOSE.test(source)) {
+        const closing = SVG_CLOSE.exec(source);
+        if (element.matches('pre') || !source.slice(closing.index + closing[0].length).trim()) removeDiagramBlock(element, clone);
+        continue;
+      }
+      // Markdown can produce separate paragraphs inside a standalone SVG block.
+      const continuation = [];
+      for (let next = element.nextElementSibling; next?.matches('p, pre') && /^\s*</.test(svgMarkup(next.textContent)); next = next.nextElementSibling) {
+        const part = svgMarkup(next.textContent);
+        continuation.push(next);
+        if (/<\/svg\s*>\s*$/i.test(part)) {
+          removeDiagramBlock(element, clone);
+          for (const paragraph of continuation) paragraph.remove();
+          break;
+        }
+      }
+    }
+    const walker = clone.ownerDocument.createTreeWalker(clone, 4); // SHOW_TEXT
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (!node.parentElement?.closest('[data-ge-math], .katex, .katex-display')) {
+        node.nodeValue = node.nodeValue.replace(/\uE200cite\b[\s\S]*?\uE201/gi, '');
+      }
+    }
+  }
+
+  function safeSnapshotClone(container, purpose) {
     const clone = container.cloneNode(true);
+    if (purpose === 'pdf') filterPdfContent(clone);
     if (clone.nodeType === 1) clone.removeAttribute('style');
     for (const svg of Array.from(clone.querySelectorAll('svg'))) {
       const source = svg.getAttribute('data-ge-mermaid-source') || '';
@@ -763,9 +861,9 @@
     return clone;
   }
 
-  async function snapshotRichContent(container, { onProgress } = {}) {
+  async function snapshotRichContent(container, { onProgress, purpose } = {}) {
     if (!container || typeof container.cloneNode !== 'function') throw new TypeError('富内容容器无效');
-    const clone = safeSnapshotClone(container);
+    const clone = safeSnapshotClone(container, purpose);
     const document = clone.ownerDocument || root.document;
     const host = document && document.body;
     const formulas = clone.querySelectorAll('[data-ge-math="true"][data-ge-rendered="true"]');

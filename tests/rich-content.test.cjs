@@ -140,7 +140,7 @@ test('snapshots embed READY raster media and safe downloads without SVG or remot
 
   assert.equal(snapshot.querySelectorAll('svg,script,foreignObject').length, 0);
   assert.equal(snapshot.querySelectorAll('img[src="data:image/png;base64,iVBORw=="]').length, 2, html);
-  assert.match(html, /alt="TeX: x" class="ge-inline-math" width="24" height="12"/);
+  assert.match(html, /alt="TeX: x" class="ge-snapshot-image ge-inline-math" width="24" height="12"/);
   assert.match(html, /href="data:application\/pdf;base64,JVBERi0xLjQK" download="report\.pdf"/);
   assert.doesNotMatch(html, /data-ge-image-ref|data-ge-asset-id|https:\/\/tracker|data:text\/html|image\/svg\+xml/);
 });
@@ -334,4 +334,78 @@ test('refreshes a deduplicated image in every message with an explicit asset ref
   api.refreshRichAssets(container, conversation, [shared.id]);
   assert.equal(owner.querySelector('img'), null);
   assert.equal(reused.querySelector('img'), null);
+});
+
+test('PDF snapshots omit generated diagrams, citations, and export metadata while keeping conversation content', async () => {
+  const api = global.GptExporter;
+  const conversation = {
+    title: 'Export header title',
+    warnings: ['Export warning'],
+    messages: [
+      { id: 'question', role: 'user', createTime: '2026-10-02T12:30:00Z', markdown: [
+        'User question.',
+        '[Attachment: notes.txt]',
+        '[Image: preview.png]',
+        'Keep the syntax `[Attachment: example.txt]` in this sentence.',
+        'Read [Attachment: prose.txt] before replying.'
+      ].join('\n\n') },
+      { id: 'answer', role: 'assistant', markdown: [
+        'The proposed route stays open. \uE200cite\uE202turn0search3\uE201 [Custom link](https://example.test)',
+        '## 项目时间线',
+        '<svg xmlns="http://www.w3.org/2000/svg">\n\n<text>SVG markers</text>\n\n</svg>',
+        'These milestones are estimates.',
+        '**Alternate timeline**',
+        '```svg\n<svg viewBox="0 0 20 10"><text>Fenced markers</text></svg>\n```',
+        '## Escaped diagram',
+        '&amp;lt;svg viewBox="0 0 20 10"&amp;gt;&amp;lt;text&amp;gt;Escaped markers&amp;lt;/text&amp;gt;&amp;lt;/svg&amp;gt;',
+        '## Mermaid diagram',
+        '```mermaid\nflowchart LR\n A-->B\n```',
+        '## Results',
+        '```js\nconst valid = a < b && b > c;\n```',
+        '| Value | Result |\n| --- | --- |\n| Inputs | Valid |',
+        'Math $\\sqrt{x}$.',
+        '### Sources',
+        '- [Source list entry](https://example.test/source)'
+      ].join('\n\n') }
+    ]
+  };
+  const container = document.createElement('div');
+  container.innerHTML = api.renderHtmlFragment(conversation, { includeMetadata: true, includeMessageTimestamp: true });
+  const question = container.querySelector('[data-role="user"] .message-body');
+  question.insertAdjacentHTML('beforeend', `<img src="${imageData}" alt="Uploaded photo">`);
+  const answer = container.querySelector('[data-role="assistant"] .message-body');
+  answer.insertAdjacentHTML('beforeend', '<p>A useful result<span data-citation>Citation chip</span>.</p>' +
+    '<section data-testid="deep-thinking">Reasoning data</section>' +
+    '<section data-testid="tool-call">Tool data</section>' +
+    '<section data-testid="sources-list">Source widget</section>' +
+    '<h3>Vector diagram</h3><figure><svg><text>Raw SVG markers</text></svg></figure>');
+  answer.parentElement.insertAdjacentHTML('beforeend', '<p class="branch-affiliations">Branch note</p>' +
+    '<section class="ge-attachments">Attachment notice</section>');
+  await api.enhanceRichContent(container, conversation);
+  assert.ok(container.querySelector('.katex svg'));
+  assert.ok(container.querySelector('.ge-mermaid-diagram'));
+
+  const snapshot = await api.snapshotRichContent(container, { purpose: 'pdf' });
+  assert.doesNotMatch(snapshot.textContent, /项目时间线|Alternate timeline|Escaped diagram|Mermaid diagram|Vector diagram|markers|Source list entry|Citation chip|Reasoning data|Tool data|Source widget|Export warning|Export header title|Branch note|Attachment notice|\uE200|<svg/i);
+  assert.match(snapshot.textContent, /User question/);
+  assert.doesNotMatch(snapshot.textContent, /notes\.txt|preview\.png/);
+  assert.match(snapshot.textContent, /Keep the syntax \[Attachment: example\.txt\] in this sentence\./);
+  assert.match(snapshot.textContent, /Read \[Attachment: prose\.txt\] before replying\./);
+  assert.match(snapshot.textContent, /The proposed route stays open/);
+  assert.match(snapshot.textContent, /These milestones are estimates/);
+  assert.match(snapshot.textContent, /A useful result\./);
+  assert.match(snapshot.textContent, /const valid = a < b && b > c/);
+  assert.equal(snapshot.querySelector('a').href, 'https://example.test/');
+  assert.equal(snapshot.querySelector('table td').textContent, 'Inputs');
+  assert.equal(snapshot.querySelector('img[alt="Uploaded photo"]').getAttribute('src'), imageData);
+  assert.ok(snapshot.querySelector('img.ge-inline-math, .ge-math-source-fallback'));
+  assert.equal(snapshot.querySelector('header, time, svg'), null);
+
+  const htmlSnapshot = await api.snapshotRichContent(container);
+  assert.match(htmlSnapshot.textContent, /项目时间线|Alternate timeline/);
+  assert.match(htmlSnapshot.textContent, /Fenced markers/);
+  assert.match(htmlSnapshot.textContent, /Source list entry/);
+  assert.match(htmlSnapshot.textContent, /Attachment notice/);
+  assert.match(htmlSnapshot.textContent, /\[Attachment: notes\.txt\]/);
+  assert.ok(container.querySelector('.ge-mermaid-diagram'));
 });

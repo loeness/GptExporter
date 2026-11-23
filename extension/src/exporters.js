@@ -91,10 +91,11 @@
         const alt = rawAttribute(attributes, 'alt');
         const width = safeImageDimension(rawAttribute(attributes, 'width'));
         const height = safeImageDimension(rawAttribute(attributes, 'height'));
-        const inlineMath = safeClass(rawAttribute(attributes, 'class')).split(/\s+/).includes('ge-inline-math');
+        const classes = safeClass(rawAttribute(attributes, 'class')).split(/\s+/)
+          .filter(value => value === 'ge-inline-math' || value === 'ge-snapshot-image').join(' ');
         return '<img' + (data ? ' data-ge-safe-image="' + data + '"' : '') +
           ' alt="' + alt.replace(/"/g, '&quot;') + '"' +
-          (inlineMath ? ' class="ge-inline-math"' : '') +
+          (classes ? ` class="${classes}"` : '') +
           (width ? ' width="' + width + '"' : '') + (height ? ' height="' + height + '"' : '') + '>';
       })
       .replace(/\s+(?:src|srcset|poster|background|style|srcdoc|formaction)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')

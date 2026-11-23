@@ -2,6 +2,7 @@
 const {chromium}=require('playwright');
 const assert=require('node:assert/strict');
 const {execFileSync}=require('node:child_process');
+const {createHash}=require('node:crypto');
 const fs=require('node:fs');
 const os=require('node:os');
 const path=require('node:path');
@@ -74,10 +75,11 @@ function readPdfContent(file){
     'import sys,json,base64',
     'from pypdf import PdfReader',
     'reader=PdfReader(sys.argv[1])',
-    "text='\\n'.join(page.extract_text() or '' for page in reader.pages)",
+    'bodyFontSizes=[]',
+    "text='\\n'.join(page.extract_text(visitor_text=lambda text,cm,tm,font,size: bodyFontSizes.append(size) if 'ABC123' in text else None) or '' for page in reader.pages)",
     "attachments={name:[base64.b64encode(data).decode('ascii') for data in files] for name,files in reader.attachments.items()}",
     'images=sum(len(page.images) for page in reader.pages)',
-    "print(json.dumps({'text':text,'images':images,'attachments':attachments},ensure_ascii=False))"
+    "print(json.dumps({'text':text,'images':images,'attachments':attachments,'pages':len(reader.pages),'bodyFontSizes':bodyFontSizes},ensure_ascii=False))"
   ].join(';');
   return JSON.parse(execFileSync(pythonExecutable,['-c',source,file],{encoding:'utf8'}));
 }
@@ -139,6 +141,7 @@ function isPdfFile(file){
     await popup.locator('#setting-show-toolbar').check();
     await chat.waitForFunction(()=>document.getElementById('gpt-exporter-launcher')?.hidden === false);
     checks.push('popup switch hides and restores the page launcher');
+    await popup.locator('#setting-message-timestamp').check();
     await worker.evaluate(id=>chrome.tabs.update(id,{active:true}),tab.id);
     const readerPromise=context.waitForEvent('page');await chat.locator('#gpt-exporter-select').click();
     const reader=await readerPromise;reader.setDefaultTimeout(30000);await reader.waitForSelector('#message-list input');
@@ -188,9 +191,87 @@ function isPdfFile(file){
     assert.equal(fs.readFileSync(await attachmentDownload.path(),'utf8'),'附件原始内容：保留字节。\nfixture attachment\n');
     await offline.screenshot({path:path.join(output,'offline-html.png'),fullPage:false});await offline.close();
     checks.push('standalone rich HTML without external resources');
-    const pdfPromise=reader.waitForEvent('download',{timeout:60000});await reader.locator('[data-format="pdf"]').click();
-    const pdfDownload=await pdfPromise;const pdfPath=path.join(output,'rich.pdf');await pdfDownload.saveAs(pdfPath);
-    assert.match(fs.readFileSync(pdfPath).subarray(0,8).toString(),/^%PDF-/);checks.push('direct local PDF download');
+    const pdfDialog=reader.locator('#pdf-preview-dialog');
+    const readerTimestamp=await reader.locator('#preview-content article h2 time').first().innerText();
+    assert.ok(readerTimestamp,'Reader displays enabled message timestamps before PDF export');
+    const pdfViewerErrors=[];
+    reader.on('console',message=>{
+      if(message.type()==='error' && /blob:|pdf-viewer|Content Security Policy/i.test(message.text())){
+        pdfViewerErrors.push(message.text());
+      }
+    });
+    let observedDownloads=0;
+    const countDownload=()=>observedDownloads++;
+    reader.on('download',countDownload);
+    await reader.locator('[data-format="pdf"]').click();
+    await pdfDialog.waitFor({state:'visible'});
+    let explicitDownloads=0;
+    const downloadPreview=async (name,previousUrl='')=>{
+      const frameUrl=await reader.waitForFunction(previous=>{
+        const frame=document.querySelector('#pdf-preview-frame');
+        const download=document.querySelector('#pdf-preview-download');
+        return frame?.src.startsWith('blob:') && frame.src!==previous && !download?.disabled && frame.src;
+      },previousUrl,{timeout:60000});
+      await reader.locator('#pdf-preview-frame').waitFor({state:'visible'});
+      const url=await frameUrl.jsonValue();
+      const previewHash=await reader.evaluate(async url=>{
+        const response=await fetch(url);
+        const digest=await crypto.subtle.digest('SHA-256',await response.arrayBuffer());
+        return Array.from(new Uint8Array(digest),byte=>byte.toString(16).padStart(2,'0')).join('');
+      },url);
+      assert.equal(observedDownloads,explicitDownloads,'opening or updating the preview does not automatically download the PDF');
+      const pending=reader.waitForEvent('download',{timeout:60000});
+      explicitDownloads++;
+      await reader.locator('#pdf-preview-download').click();
+      const file=path.join(output,name);
+      await (await pending).saveAs(file);
+      const bytes=fs.readFileSync(file);
+      assert.equal(bytes.subarray(0,5).toString(),'%PDF-');
+      assert.equal(createHash('sha256').update(bytes).digest('hex'),previewHash,'the download uses the PDF displayed in the preview');
+      return {file,url,content:readPdfContent(file)};
+    };
+    const initialPdf=await downloadPreview('rich.pdf');
+    const pdfPath=initialPdf.file;
+    const nativeFrame=await reader.locator('#pdf-preview-frame').elementHandle();
+    const pdfFrame=await nativeFrame.contentFrame();
+    assert.ok(pdfFrame,'the PDF is loaded in a browser frame');
+    await pdfFrame.waitForURL(initialPdf.url);
+    await reader.screenshot({path:path.join(output,'reader-pdf-preview.png')});
+    assert.deepEqual(pdfViewerErrors,[],'the browser permits the PDF viewer to load');
+    renderPdfFirstPage(pdfPath,path.join(output,'reader-pdf-page-1.png'));
+    assert.match(initialPdf.content.text,/精确还原测试 ABC123/);
+    assert.match(initialPdf.content.text,/历史回答 8\.10/);
+    assert.doesNotMatch(initialPdf.content.text,/TOOL_SECRET_FIXTURE|THINKING_SECRET_FIXTURE|turn0search0|另一个分支的回答/);
+    assert.ok(!initialPdf.content.text.replace(/\s/g,'').includes(readerTimestamp.replace(/\s/g,'')),'Reader PDF excludes message timestamps');
+    assert.doesNotMatch(initialPdf.content.text,/整理消息|搜索消息内容|复制 Markdown|系统打印|下载到本地设备/,'Reader controls are excluded from the PDF');
+    assert.equal(initialPdf.content.images,3,'the preview retains the uploaded image and both formulas');
+    assert.doesNotMatch(initialPdf.content.text,/notes\.txt/,'assistant attachment notices are excluded from the Reader PDF');
+    assert.deepEqual(initialPdf.content.attachments,{},'the Reader PDF excludes files attached to assistant messages');
+    const fontSize=reader.locator('#pdf-font-size');
+    assert.deepEqual(await fontSize.evaluate(input=>[input.min,input.max,input.step]),['8','13','1']);
+    const density=reader.locator('#pdf-density');
+    assert.deepEqual(await density.locator('option').evaluateAll(options=>options.map(option=>option.value)),['compact','standard','roomy']);
+    const previousDensity=await density.inputValue();
+    await density.selectOption('roomy');
+    const roomy=previousDensity==='roomy'?initialPdf:await downloadPreview('rich-roomy.pdf',initialPdf.url);
+    await density.selectOption('compact');
+    const compact=await downloadPreview('rich-compact.pdf',roomy.url);
+    assert.ok(compact.content.pages<roomy.content.pages,
+      `Compact density should reduce pagination at the same font size (${compact.content.pages} vs ${roomy.content.pages})`);
+    assert.match(compact.content.text,/精确还原测试 ABC123/);
+    assert.equal((compact.content.text.match(/历史回答 \d+\.\d+：/g)||[]).length,80);
+    assert.equal(compact.content.images,roomy.content.images);
+    const originalFontSize=await fontSize.inputValue();
+    const alternateSize=originalFontSize==='13'?'8':'13';
+    await fontSize.press(alternateSize==='8'?'Home':'End');
+    const resized=await downloadPreview('rich-resized.pdf',compact.url);
+    assert.match(resized.content.text,/精确还原测试 ABC123/);
+    assert.deepEqual(compact.content.bodyFontSizes,[Number(originalFontSize)]);
+    assert.deepEqual(resized.content.bodyFontSizes,[Number(alternateSize)],'the selected size changes body text in the PDF itself');
+    await reader.keyboard.press('Escape');
+    await pdfDialog.waitFor({state:'hidden'});
+    reader.off('download',countDownload);
+    checks.push('Reader PDF preview and download share bytes, retain rich content, and respect density');
     const options=await reader.locator('#branch-select option').allTextContents();
     assert.equal(options.length,3);await reader.locator('#branch-select').selectOption('__all');
     assert.equal(await reader.locator('#message-list input').count(),19);
@@ -263,11 +344,11 @@ function isPdfFile(file){
     assert.doesNotMatch(allQuickText,/另一个分支的回答/,'All must not include the alternative branch');
     assert.equal((allQuickText.match(/历史问题 \d+，/g)||[]).length,8,'All includes the eight historical user turns');
     assert.equal((allQuickText.match(/历史回答 \d+\.\d+：/g)||[]).length,80,'All includes all eight numbered historical assistant answers');
-    assert.ok(allQuick.images>=4,'All quick PDF embeds the source image, two formula snapshots, and Mermaid diagram');
-    assert.ok(allQuick.attachments['notes.txt']?.length,'All quick PDF embeds the notes.txt attachment');
-    assert.equal(allQuick.attachments['notes.txt'][0],Buffer.from('附件原始内容：保留字节。\nfixture attachment\n','utf8').toString('base64'));
+    assert.equal(allQuick.images,3,'All quick PDF embeds the uploaded image and both formulas');
+    assert.doesNotMatch(allQuickText,/notes\.txt/,'assistant attachment notices are excluded from the quick PDF');
+    assert.deepEqual(allQuick.attachments,{},'All quick PDF excludes files attached to assistant messages');
     const quickPdfPreviewPath=renderPdfFirstPage(allQuick.file,path.join(output,'quick-all-page-1.png'));
-    checks.push('All quick PDF contains complete current-branch history, four raster images, and the original notes.txt attachment');
+    checks.push('All quick PDF contains complete current-branch history, the original image, and both formulas');
     const questionsQuick=await quickPdf('questions',9);const questionsQuickText=questionsQuick.text;
     assert.match(questionsQuickText,/完整历史测试：请保留数学、图表和附件/);
     for(let index=1;index<=8;index++)assert.match(questionsQuickText,new RegExp('历史问题 '+index));

@@ -5,6 +5,7 @@
   const VALID_ROLES = new Set(['user', 'assistant', 'system', 'tool']);
   const ROLE_LABELS = { user: 'User', assistant: 'Assistant', system: 'System', tool: 'Tool' };
   const els = {};
+  let activePdfPreview = null;
   const state = {
     conversation: null,
     storageKey: '',
@@ -35,7 +36,9 @@
       'conversation-title', 'include-metadata', 'copy-markdown', 'print-document',
       'theme-toggle', 'clear-data', 'preview-paper', 'preview-content', 'preview-empty',
       'load-error', 'error-title', 'error-detail', 'reload-demo', 'status-line',
-      'source-caption', 'branch-select', 'source-quality', 'load-media', 'pdf-page-size', 'pdf-orientation'
+      'source-caption', 'branch-select', 'source-quality', 'load-media', 'pdf-page-size', 'pdf-orientation',
+      'pdf-preview-dialog', 'pdf-font-size', 'pdf-font-value', 'pdf-density', 'close-pdf-preview',
+      'pdf-preview-frame', 'pdf-preview-status', 'pdf-preview-download', 'pdf-preview-open', 'pdf-preview-retry'
     ].forEach((id) => { els[id] = byId(id); });
   }
 
@@ -430,7 +433,7 @@
   }
 
   async function downloadResult(result) {
-    const blob = new Blob([result.content], { type: result.mime });
+    const blob = result.content instanceof Blob ? result.content : new Blob([result.content], { type: result.mime });
     const href = root.URL.createObjectURL(blob);state.blobUrls.add(href);
     const filename = root.GptExporter.exportSettings.filename(els['conversation-title'].value, result.extension, state.exportSettings);
     if (state.exportSettings.closeSelectionAfterExport) {
@@ -463,31 +466,26 @@
     if (!messages.length) throw new Error('请先勾选至少一条消息。');
     setBusy(true);
     try {
-      let renderedHtml, snapshot, failed = 0;
-      if (format==='pdf'||format==='html') {
+      let renderedHtml, failed = 0;
+      if (format === 'html') {
         showStatus('正在准备本地文档与媒体…','info');
         failed = await hydrateSelectedAssets();
         showStatus('正在准备公式和图表…', 'info');
-        snapshot = await root.GptExporter.snapshotRichContent(els['preview-content'], {
+        const snapshot = await root.GptExporter.snapshotRichContent(els['preview-content'], {
           onProgress: ({completed, total}) => {
             showStatus(`正在处理公式和图表 ${completed}/${total}…`, 'info');
           }
         });
-        if (format === 'html') renderedHtml = snapshot.innerHTML;
+        renderedHtml = snapshot.innerHTML;
       }
       const options={...state.exportSettings,format,includeMetadata:els['include-metadata'].checked,messages,renderedHtml,
         includeConversationLink:state.exportSettings.includeConversationLink !== false,
         includeMessageTimestamp:state.exportSettings.includeMessageTimestamp === true};
-      if (format === 'pdf') showStatus('正在排版并生成 PDF…', 'info');
-      const result = format==='pdf' ? {
-        content:await root.GptExporter.buildPdf({container:snapshot,consumeContainer:true,conversation:currentConversation(),messages,
-          includeMetadata:options.includeMetadata,pageSize:els['pdf-page-size'].value,orientation:els['pdf-orientation'].value}),
-        mime:'application/pdf',extension:'pdf'
-      } : root.GptExporter.serialize(currentConversation(),options);
+      const result = root.GptExporter.serialize(currentConversation(), options);
       showStatus('正在保存文件…', 'info');
       await downloadResult(result);
       let clipboardError = '';
-      if (format !== 'pdf' && state.exportSettings.copyToClipboardAfterExport) {
+      if (state.exportSettings.copyToClipboardAfterExport) {
         try {
           if (!root.navigator.clipboard?.writeText) throw new Error('浏览器未提供剪贴板接口');
           await root.navigator.clipboard.writeText(String(result.content));
@@ -496,6 +494,133 @@
       showStatus(`已生成 ${result.extension.toUpperCase()}，包含所选 ${messages.length} 条消息${failed?`；${failed} 个媒体缺失，已保留提示`:''}${clipboardError?`；复制失败：${clipboardError}`:''}。`,failed || clipboardError ?'error':'success');
       if (state.exportSettings.closeSelectionAfterExport && !clipboardError) root.close();
     } finally {setBusy(false);preloadSelectedImages();}
+  }
+
+  function showPdfStatus(text, kind = 'info') {
+    els['pdf-preview-status'].textContent = text;
+    els['pdf-preview-status'].dataset.kind = kind;
+  }
+
+  function pdfLayoutOptions() {
+    return {
+      fontSize: Number(els['pdf-font-size'].value),
+      density: els['pdf-density'].value,
+      pageSize: els['pdf-page-size'].value,
+      orientation: els['pdf-orientation'].value
+    };
+  }
+
+  function finishClosedPreview(job) {
+    if (activePdfPreview || job.running || job.downloading) return;
+    setBusy(false);
+    preloadSelectedImages();
+  }
+
+  function requestPdfPreview(delay = 0) {
+    const job = activePdfPreview;
+    if (!job || job.downloading) return;
+    root.clearTimeout(job.timer);
+    job.layout = pdfLayoutOptions();
+    els['pdf-preview-download'].disabled = true;
+    els['pdf-preview-open'].hidden = true;
+    els['pdf-preview-retry'].hidden = true;
+    if (!job.running) {
+      if (delay) job.timer = root.setTimeout(() => { void buildPdfPreview(job); }, delay);
+      else void buildPdfPreview(job);
+    }
+  }
+
+  async function buildPdfPreview(job) {
+    const { GptExporter: api } = root;
+    job.running = true;
+    try {
+      if (!job.snapshot) {
+        showPdfStatus('正在读取所选图片与附件…');
+        job.missing = await hydrateSelectedAssets();
+        if (activePdfPreview !== job) return;
+        showPdfStatus('正在准备公式…');
+        job.snapshot = await api.snapshotRichContent(els['preview-content'], {
+          purpose: 'pdf',
+          onProgress: ({completed, total}) => {
+            if (activePdfPreview === job) showPdfStatus(`正在处理公式 ${completed}/${total}…`);
+          }
+        });
+      }
+      while (activePdfPreview === job) {
+        const layout = job.layout;
+        showPdfStatus('正在生成分页预览…');
+        const content = await api.buildPdf({
+          ...layout, container: job.snapshot, consumeContainer: true, conversation: job.conversation, messages: job.messages,
+          conversationOnly: true, includeMetadata: false
+        });
+        if (activePdfPreview !== job) return;
+        if (layout !== job.layout) continue;
+        job.blob = new Blob([content], {type: 'application/pdf'});
+        const previousUrl = job.url;
+        job.url = root.URL.createObjectURL(job.blob);
+        els['pdf-preview-frame'].src = job.url + '#view=FitH';
+        els['pdf-preview-frame'].hidden = false;
+        els['pdf-preview-open'].href = job.url;
+        els['pdf-preview-open'].hidden = false;
+        if (previousUrl) root.URL.revokeObjectURL(previousUrl);
+        els['pdf-preview-download'].disabled = false;
+        const status = job.forPrint ? '可在页面预览的工具栏中打印。' : '预览已更新。';
+        const missing = job.missing ? ` ${job.missing} 个媒体无法嵌入。` : '';
+        showPdfStatus(status + missing, job.missing ? 'error' : 'success');
+        return;
+      }
+    } catch (error) {
+      if (activePdfPreview === job) {
+        showPdfStatus(error.message || '无法生成 PDF 预览。', 'error');
+        els['pdf-preview-retry'].hidden = false;
+      }
+    } finally {
+      job.running = false;
+      finishClosedPreview(job);
+    }
+  }
+
+  function openPdfPreview(forPrint = false) {
+    if (state.busy) return;
+    const messages = selectedMessages();
+    if (!messages.length) throw new Error('请先勾选至少一条消息。');
+    setBusy(true);
+    activePdfPreview = {messages, conversation: currentConversation(), forPrint};
+    els['pdf-preview-dialog'].showModal();
+    requestPdfPreview();
+  }
+
+  function releasePdfPreview() {
+    const job = activePdfPreview;
+    if (!job) return;
+    activePdfPreview = null;
+    root.clearTimeout(job.timer);
+    els['pdf-preview-frame'].hidden = true;
+    els['pdf-preview-frame'].removeAttribute('src');
+    els['pdf-preview-open'].removeAttribute('href');
+    if (job.url) root.URL.revokeObjectURL(job.url);
+    finishClosedPreview(job);
+  }
+
+  async function downloadPdfPreview() {
+    const job = activePdfPreview;
+    if (!job?.blob || job.running || job.downloading) return;
+    job.downloading = true;
+    const controls = ['pdf-font-size', 'pdf-density', 'pdf-page-size', 'pdf-orientation', 'pdf-preview-download'];
+    controls.forEach(id => { els[id].disabled = true; });
+    showPdfStatus('正在保存 PDF…');
+    try {
+      await downloadResult({content: job.blob, mime: 'application/pdf', extension: 'pdf'});
+      if (activePdfPreview === job) showPdfStatus('已提交 PDF 下载。', 'success');
+      if (state.exportSettings.closeSelectionAfterExport) root.close();
+    } catch (error) {
+      if (activePdfPreview === job) showPdfStatus(error.message || '下载 PDF 失败。', 'error');
+      else showStatus(error.message || '下载 PDF 失败。', 'error');
+    } finally {
+      job.downloading = false;
+      controls.forEach(id => { els[id].disabled = false; });
+      finishClosedPreview(job);
+    }
   }
 
   async function copyMarkdown() {
@@ -518,18 +643,6 @@
     } catch (error) {
       showStatus(error && error.message ? error.message : '复制失败，请检查剪贴板权限。', 'error');
     }
-  }
-
-  async function printDocument() {
-    if (state.busy) return;
-    try {
-      if (!selectedMessages().length) throw new Error('请先勾选至少一条消息。');
-      setBusy(true);
-      await hydrateSelectedAssets();root.print();
-      showStatus('已打开打印对话框，可选择“保存为 PDF”。');
-    } catch (error) {
-      showStatus(error && error.message ? error.message : '无法打开打印对话框。', 'error');
-    } finally { setBusy(false); }
   }
 
   async function clearCurrentData() {
@@ -592,7 +705,21 @@
     });
     els['clear-data'].addEventListener('click', clearCurrentData);
     els['copy-markdown'].addEventListener('click', copyMarkdown);
-    els['print-document'].addEventListener('click', printDocument);
+    els['print-document'].addEventListener('click', () => {
+      try { openPdfPreview(true); }
+      catch (error) { showStatus(error.message, 'error'); }
+    });
+    els['pdf-preview-dialog'].addEventListener('close', releasePdfPreview);
+    els['close-pdf-preview'].addEventListener('click', () => els['pdf-preview-dialog'].close());
+    els['pdf-preview-retry'].addEventListener('click', () => requestPdfPreview());
+    els['pdf-preview-download'].addEventListener('click', downloadPdfPreview);
+    els['pdf-font-size'].addEventListener('input', () => {
+      els['pdf-font-value'].textContent = `${els['pdf-font-size'].value} pt`;
+      requestPdfPreview(160);
+    });
+    for (const id of ['pdf-font-size', 'pdf-density', 'pdf-page-size', 'pdf-orientation']) {
+      els[id].addEventListener('change', () => requestPdfPreview());
+    }
     els['reload-demo'].addEventListener('click', () => { root.location.search = '?demo=1'; });
 
     root.document.querySelectorAll('[data-select]').forEach((button) => {
@@ -610,7 +737,10 @@
     });
     root.document.querySelectorAll('[data-format]').forEach((button) => {
       button.addEventListener('click', async () => {
-        try { await saveBlob(button.dataset.format); }
+        try {
+          if (button.dataset.format === 'pdf') openPdfPreview();
+          else await saveBlob(button.dataset.format);
+        }
         catch (error) { showStatus(error && error.message ? error.message : '生成导出文件失败。', 'error'); }
       });
     });

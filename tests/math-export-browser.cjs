@@ -179,8 +179,11 @@ async function run() {
 
     const file = path.join(output, 'reader.pdf');
     const pdfStarted = performance.now();
-    const pendingDownload = reader.waitForEvent('download', { timeout });
     await reader.locator('[data-format="pdf"]').click();
+    await reader.locator('#pdf-preview-dialog').waitFor({ state: 'visible', timeout });
+    await reader.waitForFunction(() => document.querySelector('#pdf-preview-frame')?.src.startsWith('blob:'), null, { timeout });
+    const pendingDownload = reader.waitForEvent('download', { timeout });
+    await reader.locator('#pdf-preview-download').click();
     await (await pendingDownload).saveAs(file);
     const readerPdfMs = Math.round(performance.now() - pdfStarted);
     const pdf = inspectPdf(file, fixture);
