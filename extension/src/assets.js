@@ -70,13 +70,18 @@
     const initialBytes = Math.max(0, Number(options.initialBytes) || 0);
     const deadline = Date.now() + LOAD_BUDGET;
     const pending = [];
+    let budgetTimer;
+    const budgetExpired = new Promise(resolve => {
+      budgetTimer = root.setTimeout(() => resolve({error: new Error(TIME_ERROR)}), LOAD_BUDGET);
+    });
 
     async function prepare(asset) {
       if (isReady(asset) || options.shouldLoad?.(asset) === false) return {};
       if (Date.now() >= deadline) return {error: new Error(TIME_ERROR)};
       if (usage.bytes + initialBytes >= MAX_TOTAL_BYTES) return {error: new Error(BUDGET_ERROR)};
       try {
-        return {media: await fetchAsset(model.exportId, asset, deadline)};
+        const fetched = fetchAsset(model.exportId, asset, deadline).then(media => ({media}));
+        return await Promise.race([fetched, budgetExpired]);
       } catch (error) {
         return {error};
       }
@@ -102,6 +107,7 @@
         options.onProgress?.({completed: index + 1, total: assets.length, name: asset.name, status: asset.status, asset});
       }
     } finally {
+      root.clearTimeout(budgetTimer);
       usage.callers -= 1;
       if (!usage.callers) cacheUsage.delete(cache);
     }

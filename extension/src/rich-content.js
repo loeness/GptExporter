@@ -555,45 +555,74 @@
     return node.getAttribute('aria-label') || node.textContent || 'Rendered content';
   }
 
-  async function mathCanvas(node, document) {
-    const vectorRenderer=vendors().renderMathSvg;
-    if(typeof vectorRenderer==='function'){
-      try{
-        const display=node.getAttribute('data-ge-display')==='true';
-        const generated=vectorRenderer(node.getAttribute('data-ge-tex')||node.textContent||'',display);
-        const svg=sanitizeSvg(generated,document);
-        if(svg){
-          const box=String(svg.getAttribute('viewBox')||'').split(/[\s,]+/).map(Number);
-          const fontSize=parseFloat(document.defaultView.getComputedStyle(node.querySelector('.katex')||node).fontSize)||19;
-          if(box.length===4&&box.every(Number.isFinite)&&box[2]>0&&box[3]>0){
-            const width=Math.ceil(box[2]*fontSize/1000),height=Math.ceil(box[3]*fontSize/1000);
-            svg.setAttribute('width',String(width));svg.setAttribute('height',String(height));
-            const pixels=await svgCanvas(svg,document);
-            if(pixels){
-              const image=await loadSnapshotImage(pixels,root.Image);
-              const bounds=node.getBoundingClientRect();
-              const targetWidth=Math.max(1,Math.ceil(bounds.width)||width),targetHeight=Math.max(1,Math.ceil(bounds.height)||height);
-              const scale=Math.min(1,targetWidth/width,targetHeight/height);
-              const bitmap=document.createElement('canvas');bitmap.width=targetWidth*2;bitmap.height=targetHeight*2;
-              bitmap.getContext('2d').drawImage(image,(display?(targetWidth-width*scale)/2:0)*2,(targetHeight-height*scale),width*scale*2,height*scale*2);
-              return {dataUrl:bitmap.toDataURL('image/png'),width:targetWidth,height:targetHeight};
-            }
-          }
-        }
-      }catch(_){/* Keep the bounded HTML renderer as a compatibility fallback. */}
+  function measureMath(node, document) {
+    const display = node.getAttribute('data-ge-display') === 'true';
+    const tex = node.getAttribute('data-ge-tex') || node.textContent || '';
+    const bounds = node.getBoundingClientRect();
+    const view = document.defaultView;
+    const fontSize = parseFloat(view?.getComputedStyle(node.querySelector('.katex') || node).fontSize) || 19;
+    return { node, tex, display, fontSize, width: Math.ceil(bounds.width), height: Math.ceil(bounds.height) };
+  }
+
+  function validCanvasSize(width, height) {
+    return width > 0 && height > 0 && width <= 5000 && height <= 10000 && width * height <= 20000000;
+  }
+
+  async function vectorMathCanvas(math, document, renderMathSvg) {
+    const { tex, display, fontSize } = math;
+    const svg = sanitizeSvg(renderMathSvg(tex, display), document);
+    if (!svg) return null;
+    const box = String(svg.getAttribute('viewBox') || '').trim().split(/[\s,]+/).map(Number);
+    if (box.length !== 4 || !box.every(Number.isFinite) || box[2] <= 0 || box[3] <= 0) return null;
+
+    const width = Math.ceil(box[2] * fontSize / 1000);
+    const height = Math.ceil(box[3] * fontSize / 1000);
+    const targetWidth = math.width || width;
+    const targetHeight = math.height || height;
+    if (!validCanvasSize(targetWidth, targetHeight)) return null;
+    const scale = Math.min(1, targetWidth / width, targetHeight / height);
+    const drawWidth = width * scale;
+    const drawHeight = height * scale;
+    svg.setAttribute('width', String(Math.ceil(drawWidth)));
+    svg.setAttribute('height', String(Math.ceil(drawHeight)));
+
+    const dataUrl = await drawSvgSnapshot(svg, document, targetWidth, targetHeight, {
+      x: display ? targetWidth - drawWidth : 0,
+      y: targetHeight - drawHeight,
+      width: drawWidth * 2,
+      height: drawHeight * 2
+    });
+    return dataUrl ? { dataUrl, width: targetWidth, height: targetHeight } : null;
+  }
+
+  async function mathCanvas(math, document) {
+    const { node, width, height } = math;
+    const vectorRenderer = vendors().renderMathSvg;
+    if (typeof vectorRenderer === 'function') {
+      try {
+        const snapshot = await vectorMathCanvas(math, document, vectorRenderer);
+        if (snapshot) return snapshot;
+      } catch (_) { /* Try the HTML renderer for formulas without embedded SVG. */ }
     }
+
     const canvasRenderer = unwrapVendor('html2canvas') || root.html2canvas;
-    // SVG formulas require the self-contained vector renderer above. Falling
-    // back to HTML for them can silently omit radicals, so retain source instead.
-    if (typeof canvasRenderer !== 'function' || node.querySelector('svg')) return null;
+    // The HTML renderer can silently omit embedded SVG glyphs such as radicals.
+    if (typeof canvasRenderer !== 'function' || node.querySelector('svg') ||
+        ((width || height) && !validCanvasSize(width, height))) return null;
     try {
+      // html2canvas otherwise clones the whole document for every formula.
       const canvas = await canvasRenderer(node, {
         backgroundColor: null, scale: 2, logging: false, useCORS: false,
-        allowTaint: false, imageTimeout: 0, removeContainer: true
+        allowTaint: false, imageTimeout: 0, removeContainer: true,
+        ignoreElements: (element) => {
+          if (element === document.head || element.contains(node) || node.contains(element)) return false;
+          return !document.head?.contains(element) || !element.matches('style, link[rel="stylesheet"]');
+        }
       });
       if (!canvas || typeof canvas.toDataURL !== 'function') return null;
-      const data = canvas.toDataURL('image/png');
-      return isRasterDataUrl(data) ? {dataUrl:data,width:Math.round(canvas.width / 2),height:Math.round(canvas.height / 2)} : null;
+      const dataUrl = canvas.toDataURL('image/png');
+      return isRasterDataUrl(dataUrl)
+        ? { dataUrl, width: Math.round(canvas.width / 2), height: Math.round(canvas.height / 2) } : null;
     } catch (_) { return null; }
   }
 
@@ -613,33 +642,32 @@
     });
   }
 
-  async function svgCanvas(svg, document) {
-    const Serializer = document.defaultView && document.defaultView.XMLSerializer || root.XMLSerializer;
-    const ImageCtor = document.defaultView && document.defaultView.Image || root.Image;
-    const URLApi = document.defaultView && document.defaultView.URL || root.URL;
+  function measureSvg(svg) {
+    const viewBox = String(svg.getAttribute('viewBox') || '').trim().split(/[\s,]+/).map(Number);
+    const rect = svg.getBoundingClientRect();
+    const width = Math.ceil(rect.width || parseFloat(svg.getAttribute('width')) || (viewBox.length === 4 ? viewBox[2] : 0));
+    const height = Math.ceil(rect.height || parseFloat(svg.getAttribute('height')) || (viewBox.length === 4 ? viewBox[3] : 0));
+    return { width, height };
+  }
+
+  async function drawSvgSnapshot(svg, document, width, height, draw = { x: 0, y: 0, width: width * 2, height: height * 2 }) {
+    const view = document.defaultView || root;
+    const Serializer = view.XMLSerializer || root.XMLSerializer;
+    const ImageCtor = view.Image || root.Image;
+    const URLApi = view.URL || root.URL;
     if (!Serializer || !ImageCtor || !URLApi || typeof URLApi.createObjectURL !== 'function') return null;
-    const copy = svg.cloneNode(true);
-    const source = cleanSvgSource(new Serializer().serializeToString(copy));
+    const source = cleanSvgSource(new Serializer().serializeToString(svg));
     if (/<(?:foreignObject|script)\b|\son[a-z]+\s*=/i.test(source)) return null;
-    const viewBox = String(copy.getAttribute('viewBox') || '').trim().split(/[\s,]+/).map(Number);
-    const widthAttr = Number.parseFloat(copy.getAttribute('width'));
-    const heightAttr = Number.parseFloat(copy.getAttribute('height'));
-    const rect = svg.getBoundingClientRect ? svg.getBoundingClientRect() : { width: 0, height: 0 };
-    const width = Math.ceil(rect.width || widthAttr || (viewBox.length === 4 ? viewBox[2] : 0));
-    const height = Math.ceil(rect.height || heightAttr || (viewBox.length === 4 ? viewBox[3] : 0));
-    if (!width || !height || width > 5000 || height > 10000 || width * height > 20000000) return null;
-    copy.setAttribute('width', String(width));
-    copy.setAttribute('height', String(height));
-    const blob = new Blob([new Serializer().serializeToString(copy)], { type: 'image/svg+xml;charset=utf-8' });
+    const blob = new Blob([source], { type: 'image/svg+xml;charset=utf-8' });
     const objectUrl = URLApi.createObjectURL(blob);
     try {
-      const image = await loadSnapshotImage(objectUrl,ImageCtor);
+      const image = await loadSnapshotImage(objectUrl, ImageCtor);
       const canvas = document.createElement('canvas');
       canvas.width = width * 2;
       canvas.height = height * 2;
       const context = canvas.getContext('2d');
       if (!context) return null;
-      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      context.drawImage(image, draw.x, draw.y, draw.width, draw.height);
       const data = canvas.toDataURL('image/png');
       return isRasterDataUrl(data) ? data : null;
     } catch (_) {
@@ -649,14 +677,21 @@
     }
   }
 
-  function replaceWithSnapshotImage(node, dataUrl, alt, fallbackSize) {
+  async function svgCanvas(svg, document, { width, height }) {
+    if (!validCanvasSize(width, height)) return null;
+    const copy = svg.cloneNode(true);
+    copy.setAttribute('width', String(width));
+    copy.setAttribute('height', String(height));
+    return drawSvgSnapshot(copy, document, width, height);
+  }
+
+  function replaceWithSnapshotImage(node, dataUrl, alt, size) {
     const image = node.ownerDocument.createElement('img');
     image.src = dataUrl;
     image.alt = alt;
     image.className = 'ge-snapshot-image' + (node.getAttribute && node.getAttribute('data-ge-display') === 'false' ? ' ge-inline-math' : '');
-    const rect = node.getBoundingClientRect ? node.getBoundingClientRect() : null;
-    const width = Math.round(Number(rect && rect.width) || Number(node.getAttribute && node.getAttribute('width')) || Number(fallbackSize && fallbackSize.width) || 0);
-    const height = Math.round(Number(rect && rect.height) || Number(node.getAttribute && node.getAttribute('height')) || Number(fallbackSize && fallbackSize.height) || 0);
+    const width = Math.round(size.width || Number(node.getAttribute('width')) || 0);
+    const height = Math.round(size.height || Number(node.getAttribute('height')) || 0);
     if (width > 0 && width <= 30000) image.setAttribute('width', String(width));
     if (height > 0 && height <= 30000) image.setAttribute('height', String(height));
     node.replaceWith(image);
@@ -728,7 +763,7 @@
     return clone;
   }
 
-  async function snapshotRichContent(container) {
+  async function snapshotRichContent(container, { onProgress } = {}) {
     if (!container || typeof container.cloneNode !== 'function') throw new TypeError('富内容容器无效');
     const clone = safeSnapshotClone(container);
     const document = clone.ownerDocument || root.document;
@@ -746,22 +781,57 @@
       host.append(clone);
     }
     try {
-      for (const math of formulas) {
-        const snapshot = await mathCanvas(math, document);
-        if (snapshot) replaceWithSnapshotImage(math, snapshot.dataUrl, imageAltFor(math), snapshot);
-        else {
-          const source = math.getAttribute('data-ge-tex') || math.textContent || '';
-          math.replaceWith(textElement(document, 'code', 'ge-math-source-fallback', source));
+      // Read every layout before replacing any node. Measuring after each
+      // replacement would repeatedly reflow the entire conversation.
+      const total = formulas.length + diagrams.length;
+      if (total) onProgress?.({ completed: 0, total });
+      const measuredFormulas = Array.from(formulas, (node) => measureMath(node, document));
+      const measuredDiagrams = Array.from(diagrams, (node) => ({ node, size: measureSvg(node) }));
+      const cache = new Map();
+      let completed = 0;
+      let lastYield = Date.now();
+      async function reportProgress() {
+        completed++;
+        if (completed === total || Date.now() - lastYield >= 50) {
+          onProgress?.({ completed, total });
+          if (completed < total) await new Promise((resolve) => root.setTimeout(resolve, 0));
+          lastYield = Date.now();
         }
       }
-      for (const svg of diagrams) {
-        const data = await svgCanvas(svg, document);
-        if (data) replaceWithSnapshotImage(svg, data, imageAltFor(svg));
-        else {
-          const fallback = textElement(document, 'pre', 'ge-mermaid-source-fallback', svg.getAttribute('data-ge-mermaid-source') || '图表快照不可用。');
-          svg.replaceWith(fallback);
-        }
+      // Keep the measuring tree intact while the HTML fallback may need it.
+      const mathSnapshots = [];
+      for (const math of measuredFormulas) {
+        const key = JSON.stringify([math.tex, math.display, math.fontSize, math.width, math.height]);
+        if (!cache.has(key)) cache.set(key, await mathCanvas(math, document));
+        mathSnapshots.push(cache.get(key));
+        await reportProgress();
       }
+      const diagramSnapshots = [];
+      for (const { node, size } of measuredDiagrams) {
+        diagramSnapshots.push(await svgCanvas(node, document, size));
+        await reportProgress();
+      }
+      if (canAttach) clone.remove();
+      measuredFormulas.forEach(({ node, tex, width, height }, index) => {
+        const snapshot = mathSnapshots[index];
+        if (snapshot) {
+          const size = {
+            width: width || Number(node.getAttribute('width')) || snapshot.width,
+            height: height || Number(node.getAttribute('height')) || snapshot.height
+          };
+          replaceWithSnapshotImage(node, snapshot.dataUrl, imageAltFor(node), size);
+        } else {
+          node.replaceWith(textElement(document, 'code', 'ge-math-source-fallback', tex));
+        }
+      });
+      measuredDiagrams.forEach(({ node, size }, index) => {
+        const data = diagramSnapshots[index];
+        if (data) replaceWithSnapshotImage(node, data, imageAltFor(node), size);
+        else {
+          const fallback = textElement(document, 'pre', 'ge-mermaid-source-fallback', node.getAttribute('data-ge-mermaid-source') || '图表快照不可用。');
+          node.replaceWith(fallback);
+        }
+      });
       for (const element of Array.from(clone.querySelectorAll('[data-ge-image-placeholder], [data-ge-image-ref], [data-ge-asset-id], [data-ge-math], [data-ge-mermaid], [data-ge-mermaid-error], [data-ge-snapshot-measuring]'))) {
         if (element.hasAttribute('data-ge-image-placeholder') || element.hasAttribute('data-ge-image-ref') || element.hasAttribute('data-ge-asset-id')) {
           element.replaceWith(textElement(document, 'span', 'ge-unavailable-image', element.getAttribute('data-ge-alt') || '图片不可用'));
@@ -772,7 +842,7 @@
         }
       }
     } finally {
-      if (canAttach) clone.remove();
+      if (canAttach && clone.isConnected) clone.remove();
     }
     clone.removeAttribute('data-ge-snapshot-measuring');
     clone.removeAttribute('style');

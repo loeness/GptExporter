@@ -145,6 +145,79 @@ test('snapshots embed READY raster media and safe downloads without SVG or remot
   assert.doesNotMatch(html, /data-ge-image-ref|data-ge-asset-id|https:\/\/tracker|data:text\/html|image\/svg\+xml/);
 });
 
+test('measures formula snapshots before replacing nodes and reuses matching raster output', async () => {
+  const { window } = dom;
+  const api = global.GptExporter;
+  const vendors = global.GptExporterVendors;
+  const previousMath = vendors.renderMathSvg;
+  const previousRect = window.HTMLElement.prototype.getBoundingClientRect;
+  const previousContext = window.HTMLCanvasElement.prototype.getContext;
+  const previousEncoder = window.HTMLCanvasElement.prototype.toDataURL;
+  const previousImage = window.Image;
+  const drawSizes = [];
+  const vectorCalls = [];
+  const imageLoads = [];
+  const pendingUrls = new Map();
+  const progress = [];
+  let encodes = 0;
+  const container = window.document.createElement('div');
+  container.innerHTML = [24, 24, 40, 40].map((width, index) =>
+    `<span data-ge-math="true" data-ge-tex="\\sqrt{x}" data-ge-rendered="true" data-ge-display="${index === 3}" data-width="${width}">x</span>`
+  ).join('');
+  try {
+    window.HTMLElement.prototype.getBoundingClientRect = function () {
+      if (!this.hasAttribute('data-width')) return { width: 320, height: 60 };
+      assert.equal(this.parentNode.querySelectorAll('img').length, 0);
+      return { width: Number(this.getAttribute('data-width')), height: 12 };
+    };
+    vendors.renderMathSvg = (tex, display) => {
+      vectorCalls.push([tex, display]);
+      return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 500"><path d="M0 0h800v400z"/>' +
+        '<image href="https://tracker.example/math"/></svg>';
+    };
+    window.URL.createObjectURL = (blob) => {
+      const url = `blob:formula-${imageLoads.length}`;
+      pendingUrls.set(url, blob);
+      return url;
+    };
+    window.URL.revokeObjectURL = (url) => pendingUrls.delete(url);
+    window.Image = class {
+      set src(url) {
+        assert.match(url, /^blob:formula-/);
+        imageLoads.push(pendingUrls.get(url));
+        queueMicrotask(() => this.onload());
+      }
+    };
+    window.HTMLCanvasElement.prototype.getContext = function () {
+      return { drawImage: (_image, x, y, width, height) => drawSizes.push([this.width, this.height, x, y, width, height]) };
+    };
+    window.HTMLCanvasElement.prototype.toDataURL = () => { encodes++; return imageData; };
+    const snapshot = await api.snapshotRichContent(container, { onProgress: (event) => progress.push(event) });
+    assert.deepEqual(vectorCalls, [['\\sqrt{x}', false], ['\\sqrt{x}', false], ['\\sqrt{x}', true]]);
+    assert.deepEqual(drawSizes, [
+      [48, 24, 0, 2, 38, 20],
+      [80, 24, 0, 2, 38, 20],
+      [80, 24, 21, 2, 38, 20]
+    ]);
+    assert.equal(encodes, 3);
+    assert.equal(imageLoads.length, 3);
+    assert.equal(pendingUrls.size, 0);
+    assert.ok((await Promise.all(imageLoads.map((blob) => blob.text()))).every((svg) => svg.includes('<path') && !svg.includes('tracker.example')));
+    assert.deepEqual(Array.from(snapshot.querySelectorAll('img'), (img) => [img.width, img.height]), [[24, 12], [24, 12], [40, 12], [40, 12]]);
+    assert.equal(snapshot.querySelectorAll('img.ge-inline-math').length, 3);
+    assert.deepEqual(progress[0], { completed: 0, total: 4 });
+    assert.deepEqual(progress.at(-1), { completed: 4, total: 4 });
+  } finally {
+    vendors.renderMathSvg = previousMath;
+    window.HTMLElement.prototype.getBoundingClientRect = previousRect;
+    window.HTMLCanvasElement.prototype.getContext = previousContext;
+    window.HTMLCanvasElement.prototype.toDataURL = previousEncoder;
+    window.Image = previousImage;
+    delete window.URL.createObjectURL;
+    delete window.URL.revokeObjectURL;
+  }
+});
+
 test('keeps legacy HTML fallback when the local Markdown vendor is absent', () => {
   const previous = global.GptExporterVendors.MarkdownIt;
   global.GptExporterVendors.MarkdownIt = undefined;

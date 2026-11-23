@@ -95,3 +95,22 @@ test('concurrent selections enforce one aggregate allowance for their shared cac
     assert.match(assets[1].error, /40 MB/);
   } finally { delete globalThis.chrome; }
 });
+
+test('the media deadline releases export while a request is still waiting for a response', async (t) => {
+  t.mock.timers.enable({apis: ['setTimeout', 'Date']});
+  const requests = pendingResponses();
+  const asset = {id: 'late-image', status: 'pending'};
+  try {
+    const load = globalThis.GptExporter.loadConversationAssets({exportId: 'id', assets: [asset]});
+    assert.equal(requests.get(asset.id).length, 1);
+    t.mock.timers.tick(90000);
+    await load;
+    assert.equal(asset.status, 'unavailable');
+    assert.match(asset.error, /90 秒/);
+
+    requests.get(asset.id)[0](image(4));
+    await nextTurn();
+    assert.equal(asset.status, 'unavailable');
+    assert.equal(asset.dataUrl, undefined);
+  } finally { delete globalThis.chrome; }
+});

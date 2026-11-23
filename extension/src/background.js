@@ -386,10 +386,15 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message?.type === 'GPT_EXPORTER_DIRECT_PROGRESS') {
     if (sender.id !== chrome.runtime.id || sender.tab || sender.url !== chrome.runtime.getURL('direct-export.html') ||
         !activeDirectId || message.exportId !== activeDirectId) { respond({ok:false}); return false; }
-    const phases = {assets:'读取图片与附件',render:'渲染公式与图表',snapshot:'生成富内容快照',pdf:'生成 PDF 文件'};
+    const phases = {assets:'读取图片与附件',render:'排版对话内容',snapshot:'处理公式和图表',pdf:'生成 PDF 文件'};
     if (!Object.hasOwn(phases,message.phase)) { respond({ok:false}); return false; }
     directPhase = phases[message.phase];
-    if (Number.isInteger(activeDirectTabId)) chrome.tabs.sendMessage(activeDirectTabId,{type:'GPT_EXPORTER_PROGRESS',text:'正在' + directPhase + '…'}).catch(() => {});
+    if (Number.isInteger(activeDirectTabId)) {
+      const {completed, total} = message;
+      const progress = message.phase === 'snapshot' && Number.isSafeInteger(completed) &&
+        Number.isSafeInteger(total) && completed >= 0 && completed <= total && total <= 100000 ? ` ${completed}/${total}` : '';
+      chrome.tabs.sendMessage(activeDirectTabId,{type:'GPT_EXPORTER_PROGRESS',text:`正在${directPhase}${progress}…`}).catch(() => {});
+    }
     respond({ok:true}); return false;
   }
   if (message?.type === 'GPT_EXPORTER_ASSET') {

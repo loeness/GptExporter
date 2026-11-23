@@ -9,6 +9,7 @@
     "test:browser": "node tests/browser.cjs",
     "test:advanced": "node tests/advanced-browser.cjs",
     "test:large-export": "node tests/large-export-browser.cjs",
+    "test:math-export": "node tests/math-export-browser.cjs",
     "test:selection": "node tests/selection-browser.cjs",
     "test:platforms": "node tests/platforms-browser.cjs",
     "build:vendor": "node scripts/build-vendor.cjs"

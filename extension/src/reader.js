@@ -145,7 +145,9 @@
     els['status-line'].textContent = message;
     els['status-line'].dataset.kind = kind || 'success';
     els['status-line'].hidden = false;
-    state.statusTimer = root.setTimeout(() => { els['status-line'].hidden = true; }, kind === 'error' ? 6500 : 4200);
+    if (kind !== 'info' || !state.busy) {
+      state.statusTimer = root.setTimeout(() => { els['status-line'].hidden = true; }, kind === 'error' ? 6500 : 4200);
+    }
   }
 
   function showLoadError(title, detail) {
@@ -465,18 +467,24 @@
       if (format==='pdf'||format==='html') {
         showStatus('正在准备本地文档与媒体…','info');
         failed = await hydrateSelectedAssets();
-        showStatus('正在渲染导出文档…', 'info');
-        snapshot=root.GptExporter.snapshotRichContent ? await root.GptExporter.snapshotRichContent(els['preview-content']) : els['preview-content'].cloneNode(true);
+        showStatus('正在准备公式和图表…', 'info');
+        snapshot = await root.GptExporter.snapshotRichContent(els['preview-content'], {
+          onProgress: ({completed, total}) => {
+            showStatus(`正在处理公式和图表 ${completed}/${total}…`, 'info');
+          }
+        });
         if (format === 'html') renderedHtml = snapshot.innerHTML;
       }
       const options={...state.exportSettings,format,includeMetadata:els['include-metadata'].checked,messages,renderedHtml,
         includeConversationLink:state.exportSettings.includeConversationLink !== false,
         includeMessageTimestamp:state.exportSettings.includeMessageTimestamp === true};
+      if (format === 'pdf') showStatus('正在排版并生成 PDF…', 'info');
       const result = format==='pdf' ? {
         content:await root.GptExporter.buildPdf({container:snapshot,consumeContainer:true,conversation:currentConversation(),messages,
           includeMetadata:options.includeMetadata,pageSize:els['pdf-page-size'].value,orientation:els['pdf-orientation'].value}),
         mime:'application/pdf',extension:'pdf'
       } : root.GptExporter.serialize(currentConversation(),options);
+      showStatus('正在保存文件…', 'info');
       await downloadResult(result);
       let clipboardError = '';
       if (format !== 'pdf' && state.exportSettings.copyToClipboardAfterExport) {
@@ -518,7 +526,7 @@
       if (!selectedMessages().length) throw new Error('请先勾选至少一条消息。');
       setBusy(true);
       await hydrateSelectedAssets();root.print();
-      showStatus('已打开打印对话框，可选择“保存为 PDF”。', 'info');
+      showStatus('已打开打印对话框，可选择“保存为 PDF”。');
     } catch (error) {
       showStatus(error && error.message ? error.message : '无法打开打印对话框。', 'error');
     } finally { setBusy(false); }

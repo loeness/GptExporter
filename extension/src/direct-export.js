@@ -50,8 +50,8 @@
     if (context.released || activeExport !== context) throw new Error('导出记录已释放。');
   }
 
-  async function reportPhase(context, phase) {
-    await root.chrome.runtime.sendMessage({type:'GPT_EXPORTER_DIRECT_PROGRESS',exportId:context.exportId,phase}).catch(() => {});
+  async function reportPhase(context, phase, progress) {
+    await root.chrome.runtime.sendMessage({type:'GPT_EXPORTER_DIRECT_PROGRESS',exportId:context.exportId,phase,...progress}).catch(() => {});
     assertCurrent(context);
   }
 
@@ -74,7 +74,11 @@
     await api.enhanceRichContent(stage, model);
     assertCurrent(context);
     await reportPhase(context,'snapshot');
-    return api.snapshotRichContent(content);
+    return api.snapshotRichContent(content, {
+      onProgress: (progress) => {
+        if (!context.released) void reportPhase(context, 'snapshot', progress).catch(() => {});
+      }
+    });
   }
 
   async function renderExport(context, format) {
