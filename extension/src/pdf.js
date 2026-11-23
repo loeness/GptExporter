@@ -83,6 +83,8 @@
       if (settings.skipNestedLists && (tag === 'ul' || tag === 'ol')) return [];
       if (tag === 'br') return [{ text: '\n', ...inherited }];
       if (tag === 'img') {
+        const replacement = settings.replaceImage && settings.replaceImage(current, inherited);
+        if (replacement) return [replacement];
         const alt = cleanText(current.getAttribute('alt') || '');
         return alt ? [{ text: alt, ...inherited }] : [];
       }
@@ -183,24 +185,75 @@
     });
   }
 
-  function buildTable(table, maxWidth, typography) {
+  function semanticMathStack(node, maxWidth, typography, imageInfo, imageName, { fontSize = typography.fontSize, style = null } = {}) {
+    if (!node.querySelector('img[alt^="TeX:"]')) return null;
+    const runs = inlineRuns(node, {
+      ...typography,
+      fontSize,
+      replaceImage(image, inherited) {
+        if (!/^TeX:/.test(image.getAttribute('alt') || '')) return null;
+        const source = imageInfo(image.getAttribute('src'));
+        const size = imageDisplaySize(image, source && source.dimensions, maxWidth, maxWidth);
+        if (!size) return null;
+        const maxHeight = Math.max(fontSize, typography.fontSize) * (image.classList.contains('ge-snapshot-image') &&
+          !image.classList.contains('ge-inline-math') ? 5 : 1.8);
+        // Snapshot dimensions already include the source heading or table font size.
+        const width = Math.min(size.width * typography.fontSize / 10, size.width * maxHeight / size.height, Math.max(0.75, maxWidth - 16));
+        return { type: 'math', definition: { image: imageName(source.dataUrl), width, link: inherited.link } };
+      }
+    });
+    if (!runs.some((run) => run.type === 'math')) return null;
+    const parts = [];
+    for (const run of runs) {
+      const previous = parts[parts.length - 1];
+      if (run.type === 'math') parts.push(run);
+      else if (previous && previous.type === 'text') previous.runs.push(run);
+      else parts.push({ type: 'text', runs: [run] });
+    }
+    return wrapInlineMath(parts, maxWidth, { ...typography, fontSize }, { style, trailingMargin: false });
+  }
+
+  function buildTable(table, maxWidth, typography, imageInfo, imageName) {
     const rows = directRows(table);
     if (!rows.length) return null;
     const cellRows = rows.map(directCells);
-    const columnCount = Math.max(1, ...cellRows.map((cells) => cells.reduce((count, cell) => {
-      const span = Number.parseInt(cell.getAttribute('colspan') || '1', 10);
-      return count + (Number.isSafeInteger(span) ? Math.max(1, Math.min(16, span)) : 1);
-    }, 0)));
+    const occupied = cellRows.map(() => []);
+    let columnCount = 1;
+    let groupEnd = 0;
+    const positionedRows = cellRows.map((cells, rowIndex) => {
+      let column = 0;
+      if (groupEnd === rowIndex) {
+        const rowGroup = rows[rowIndex].parentElement;
+        groupEnd = rowIndex + 1;
+        while (groupEnd < rows.length && rows[groupEnd].parentElement === rowGroup) groupEnd += 1;
+      }
+      return cells.map((cell) => {
+        const colSpan = Math.max(1, Math.min(16, Number.parseInt(cell.getAttribute('colspan'), 10) || 1));
+        const declaredRowSpan = Number.parseInt(cell.getAttribute('rowspan'), 10);
+        const rowSpan = declaredRowSpan === 0 ? groupEnd - rowIndex : Math.max(1, Math.min(groupEnd - rowIndex, declaredRowSpan || 1));
+        while (Array.from({ length: colSpan }, (_, offset) => occupied[rowIndex][column + offset]).some(Boolean)) column += 1;
+        const start = column;
+        column += colSpan;
+        columnCount = Math.max(columnCount, column);
+        for (let row = rowIndex; row < rowIndex + rowSpan; row += 1) {
+          for (let index = start; index < column; index += 1) occupied[row][index] = true;
+        }
+        return { cell, start, colSpan, rowSpan };
+      });
+    });
     const fontSize = typography.fontSize - 1.5;
     const cellMargin = typography.margin(4, 3, 4, 3);
-    const body = cellRows.map((cells) => {
-      const output = [];
-      for (const cell of cells) {
-        const parsedSpan = Number.parseInt(cell.getAttribute('colspan') || '1', 10);
-        const span = Number.isSafeInteger(parsedSpan) ? Math.max(1, Math.min(columnCount, parsedSpan)) : 1;
-        const maxTokenCharacters = Math.max(1, Math.floor((maxWidth / columnCount - 12) / fontSize));
+    const body = positionedRows.map((cells, rowIndex) => {
+      const output = Array.from({ length: columnCount }, (_, column) => occupied[rowIndex][column] ? '' : { text: '', margin: cellMargin });
+      for (const { cell, start, colSpan, rowSpan } of cells) {
+        // lightHorizontalLines uses 8 pt of padding on each side of an internal boundary.
+        const outerPadding = (start > 0 ? 8 : 0) + (start + colSpan < columnCount ? 8 : 0);
+        const cellWidth = Math.max(1, (maxWidth - 16 * (columnCount - 1)) / columnCount * colSpan +
+          16 * (colSpan - 1) - outerPadding - cellMargin[0] - cellMargin[2]);
+        const maxTokenCharacters = Math.max(1, Math.floor((maxWidth / columnCount * colSpan - 12) / fontSize));
+        const stack = semanticMathStack(cell, cellWidth, typography, imageInfo, imageName, { fontSize });
         const cellDefinition = {
-          text: wrapLongTokens(inlineText(cell, typography), maxTokenCharacters),
+          ...(stack ? { stack } : { text: wrapLongTokens(inlineText(cell, typography), maxTokenCharacters) }),
           margin: cellMargin,
           fontSize,
           valign: 'top'
@@ -209,12 +262,11 @@
           cellDefinition.bold = true;
           cellDefinition.fillColor = '#eef2ef';
         }
-        if (span > 1) cellDefinition.colSpan = span;
-        output.push(cellDefinition);
-        for (let index = 1; index < span; index += 1) output.push('');
+        if (colSpan > 1) cellDefinition.colSpan = colSpan;
+        if (rowSpan > 1) cellDefinition.rowSpan = rowSpan;
+        output[start] = cellDefinition;
       }
-      while (output.length < columnCount) output.push({ text: '', margin: cellMargin });
-      return output.slice(0, columnCount);
+      return output;
     });
     let headerRows = 0;
     for (let index = 0; index < rows.length; index += 1) {
@@ -436,15 +488,16 @@
     return width * 1.2;
   }
 
-  function inlineMathTable(parts, typography) {
+  function inlineMathTable(parts, typography, style) {
     const cells = [];
     const widths = [];
     for (const part of parts) {
       if (part.type === 'text') {
-        cells.push({ text: part.runs, style: 'paragraph', valign: 'middle' });
+        cells.push({ text: part.runs, ...(style ? { style } : {}), valign: 'middle' });
         widths.push('auto');
       } else {
-        cells.push({ image: part.definition.image, width: part.definition.width, alignment: 'center', margin: typography.margin(0, 2, 0, 0), valign: 'middle' });
+        const { image, width, link } = part.definition;
+        cells.push({ image, width, ...(link ? { link } : {}), alignment: 'center', margin: typography.margin(0, 2, 0, 0), valign: 'middle' });
         widths.push(part.definition.width);
       }
     }
@@ -455,7 +508,7 @@
     };
   }
 
-  function wrapInlineMath(parts, maxWidth, typography) {
+  function wrapInlineMath(parts, maxWidth, typography, { style = 'paragraph', trailingMargin = true } = {}) {
     const lines = [];
     let row = [];
     let rowWidth = 0;
@@ -477,8 +530,8 @@
         } else lastCell.runs.push(run);
         previousSource = token.source;
       }
-      if (cells.some((cell) => cell.type === 'math')) lines.push(inlineMathTable(cells, typography));
-      else lines.push({ text: cells.length ? cells[0].runs : ' ', style: 'paragraph' });
+      if (cells.some((cell) => cell.type === 'math')) lines.push(inlineMathTable(cells, typography, style));
+      else lines.push({ text: cells.length ? cells[0].runs : ' ', ...(style ? { style } : {}) });
       row = [];
       rowWidth = 0;
     };
@@ -528,11 +581,11 @@
       }
     }
     if (row.length) finishLine();
-    if (lines.length) lines[lines.length - 1].margin = typography.margin(0, 0, 0, 7);
+    if (lines.length && trailingMargin) lines[lines.length - 1].margin = typography.margin(0, 0, 0, 7);
     return lines;
   }
 
-  function paragraphBlocks(paragraph, maxWidth, maxHeight, imageInfo, imageName, typography) {
+  function paragraphBlocks(paragraph, maxWidth, maxHeight, imageInfo, imageName, typography, renderPhoto) {
     const output = [];
     let runs = [];
     let inlineParts = [];
@@ -591,7 +644,7 @@
           inlineParts.push({ type: 'math', definition });
         } else {
           flushInlineParts();
-          output.push(renderImage(node, maxWidth, maxHeight, source, imageName, typography));
+          output.push(renderPhoto?.(node, source) || renderImage(node, maxWidth, maxHeight, source, imageName, typography));
         }
         return;
       }
@@ -639,7 +692,11 @@
     const margin = typography.margin;
     const [left, top, right, bottom] = density.margins;
     const width = pageWidth(requestedPageSize, orientation) - left - right;
-    const maxHeight = (orientation === 'landscape' ? PAGE_WIDTH[requestedPageSize] : PAGE_HEIGHT[requestedPageSize]) - top - bottom - 80;
+    const contentHeight = (orientation === 'landscape' ? PAGE_WIDTH[requestedPageSize] : PAGE_HEIGHT[requestedPageSize]) - top - bottom;
+    const maxHeight = contentHeight - 80;
+    // Set the size in points, keeping the encoded raster at its available resolution.
+    const photoPairPadding = 46 + 2 * (5 + 9) * density.spacing;
+    const photoHeight = Math.min(maxHeight, Math.floor((contentHeight - photoPairPadding) / 2));
     const images = {};
     const imageNames = new Map();
     const imageInfo = (value) => getImageInfo(value, imageCache);
@@ -650,6 +707,36 @@
       imageNames.set(dataUrl, name);
       images[name] = dataUrl;
       return name;
+    };
+    const userPhotos = new WeakSet();
+    const renderUserPhoto = (node, source) => {
+      if (node.classList.contains('ge-snapshot-image') || /^TeX:/.test(node.getAttribute('alt') || '')) return null;
+      const photo = renderImage(node, width, photoHeight, source, imageName, typography);
+      if (photo.image) userPhotos.add(photo);
+      return photo;
+    };
+    const photoRenderer = (context) => context.messageRole === 'user' ? renderUserPhoto : undefined;
+    const keepPhotoPairs = (blocks) => {
+      const paired = [];
+      for (let index = 0; index < blocks.length; index++) {
+        const first = blocks[index];
+        if (userPhotos.has(first)) {
+          let next = index + 1;
+          // Markdown soft line breaks can sit between consecutive image parts.
+          while (next < blocks.length && blocks[next].style === 'paragraph' &&
+                 (Array.isArray(blocks[next].text) ? blocks[next].text : [blocks[next].text])
+                   .every(run => !(typeof run === 'string' ? run : run?.text || '').trim())) next++;
+          if (next < blocks.length && userPhotos.has(blocks[next])) {
+            const stack = [first, blocks[next]];
+            if (index === 1 && blocks[0].columns) stack.unshift(paired.pop());
+            paired.push({ stack, unbreakable: true });
+            index = next;
+            continue;
+          }
+        }
+        paired.push(first);
+      }
+      return paired;
     };
     const content = [];
     let renderedArticleCount = 0;
@@ -727,7 +814,10 @@
         const label = tag === 'math' ? textOf(node) : '';
         return [{ text: label ? `[未转换的公式：${label}]` : `[未转换的${tag === 'svg' ? '矢量图' : tag === 'math' ? '公式' : tag === 'canvas' ? '画布图像' : '媒体'}]`, style: 'resourceFallback', margin: [0, 3, 0, 7] }];
       }
-      if (tag === 'img') return [renderImage(node, width, maxHeight, imageInfo(node.getAttribute('src')), imageName, typography)];
+      if (tag === 'img') {
+        const source = imageInfo(node.getAttribute('src'));
+        return [photoRenderer(context)?.(node, source) || renderImage(node, width, maxHeight, source, imageName, typography)];
+      }
 
       if (tag === 'header') {
         if (!includeMetadata && !conversationOnly) return [];
@@ -750,7 +840,7 @@
         }));
         const linkedAssets = attachments.byMessage.get(id || '');
         if (!conversationOnly) blocks.push(...attachmentContent(linkedAssets));
-        if (messageRole === 'user') blocks = blocks.map((block) => alignPdfBlock(block, 'right'));
+        if (messageRole === 'user') blocks = keepPhotoPairs(blocks).map((block) => alignPdfBlock(block, 'right'));
         return blocks;
       }
       if (/^h[1-6]$/.test(tag)) {
@@ -774,10 +864,13 @@
         }
         const level = Number(tag.slice(1));
         const isDocumentTitle = tag === 'h1' && String(node.parentElement && node.parentElement.localName || '').toLowerCase() === 'header';
-        return [{ text: inlineText(node, typography), style: isDocumentTitle ? 'documentTitle' : `heading${level}`, margin: margin(0, level === 1 ? 3 : 9, 0, level === 1 ? 9 : 4) }];
+        const style = isDocumentTitle ? 'documentTitle' : `heading${level}`;
+        const headingFontSize = fontSize + (isDocumentTitle ? 10 : [8, 5, 3, 2, 1, 0][level - 1]);
+        const stack = semanticMathStack(node, width, typography, imageInfo, imageName, { fontSize: headingFontSize, style });
+        return [{ ...(stack ? { stack } : { text: inlineText(node, typography), style }), margin: margin(0, level === 1 ? 3 : 9, 0, level === 1 ? 9 : 4) }];
       }
       if (tag === 'p') {
-        return paragraphBlocks(node, width, maxHeight, imageInfo, imageName, typography);
+        return paragraphBlocks(node, width, maxHeight, imageInfo, imageName, typography, photoRenderer(context));
       }
       if (tag === 'pre') {
         const source = node.querySelector && node.querySelector('code') ? node.querySelector('code') : node;
@@ -798,18 +891,18 @@
           for (const item of items) {
             const explicitValue = integerAttribute(item, 'value');
             if (explicitValue != null) counter = explicitValue;
-            const itemDefinition = { stack: renderListItem(item, context.listDepth) };
+          const itemDefinition = { stack: renderListItem(item, context) };
             itemDefinition.counter = counter;
             list.ol.push(itemDefinition);
             counter += reversed ? -1 : 1;
           }
         } else {
-          for (const item of items) list.ul.push({ stack: renderListItem(item, context.listDepth) });
+        for (const item of items) list.ul.push({ stack: renderListItem(item, context) });
         }
         return [list];
       }
       if (tag === 'table') {
-        const table = buildTable(node, width, typography);
+        const table = buildTable(node, width, typography, imageInfo, imageName);
         return table ? [table] : [{ text: '[表格没有可导出的行]', style: 'resourceFallback' }];
       }
       if (tag === 'blockquote') {
@@ -866,7 +959,7 @@
         if (visible) {
           const wrapper = parent.ownerDocument.createElement('span');
           inlineNodes.forEach((node) => wrapper.appendChild(node.cloneNode(true)));
-          output.push(...paragraphBlocks(wrapper, width, maxHeight, imageInfo, imageName, typography));
+          output.push(...paragraphBlocks(wrapper, width, maxHeight, imageInfo, imageName, typography, photoRenderer(context)));
         }
         inlineNodes = [];
       };
@@ -883,8 +976,8 @@
       return output;
     };
 
-    const renderListItem = (item, listDepth) => {
-      const blocks = renderFlowChildren(item, { listDepth: listDepth + 1 });
+    const renderListItem = (item, context) => {
+      const blocks = renderFlowChildren(item, { ...context, listDepth: context.listDepth + 1 });
       return blocks.length ? blocks : [{ text: ' ', style: 'paragraph' }];
     };
 

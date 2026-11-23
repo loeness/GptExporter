@@ -43,6 +43,13 @@ $$\mathbb P(N(s)=${index}\mid N(t)=${index + 2})=\binom{${index + 2}}{${index}}\
 $$\begin{aligned}\Lambda(t)&=\int_0^t \lambda(u)\,du\\ \mathbb E[N(t)]&=\Lambda(t)\end{aligned}$$`;
 }
 
+const formulaTable = String.raw`## Count distribution $\mathbb E[N(19)]=19\lambda$
+
+| Quantity $\lambda h$ | Expression |
+| --- | --- |
+| Increment law | $e^{-\lambda h}\frac{(\lambda h)^k}{k!}$ |
+| Conditional count | $\mathbb P(N(s)=k\mid N(t)=n)=\binom nk(s/t)^k(1-s/t)^{n-k}$ |`;
+
 function makeFixture() {
   const mapping = { root: { id: 'root', parent: null, children: [], message: null } };
   let number = 0;
@@ -58,7 +65,9 @@ function makeFixture() {
   function addPairs(parent, count) {
     for (let pair = 0; pair < count; pair++) {
       const user = add(parent, 'user', String.raw`请解释泊松过程中的条件概率 $\mathbb P(N(t)>0)$ 和到达间隔。`);
-      parent = add(user, 'assistant', [explanation(number), explanation(number + 50), explanation(number)].join('\n\n'));
+      const content = [explanation(number), explanation(number + 50), explanation(number)];
+      if (number === 1) content.unshift(formulaTable);
+      parent = add(user, 'assistant', content.join('\n\n'));
     }
     return parent;
   }
@@ -66,7 +75,7 @@ function makeFixture() {
   const current = addPairs(common, 8);
   for (let branch = 0; branch < 3; branch++) addPairs(common, 2);
   return { graph: { conversation_id: conversationId, current_node: current, mapping, title: '泊松过程与条件概率' },
-    messages: number, formulas: number / 2 * (1 + 3 * 13), activeMessages: 36 };
+    messages: number, formulas: number / 2 * (1 + 3 * 13) + 4, activeMessages: 36 };
 }
 
 function inspectPdf(file, fixture) {
@@ -104,6 +113,9 @@ for page in reader.pages:
         blank += not visible
 assert '泊松过程' in text and '条件概率' in text, 'Missing searchable CJK text'
 assert '未转换的公式' not in text, 'Formula fallback leaked into the PDF'
+for label in ('Count distribution', 'Quantity', 'Expression', 'Increment law', 'Conditional count'):
+    assert label in text, f'Missing searchable heading or table label: {label}'
+assert not re.search(r'\\\\(?:mathbb|lambda|frac|mid|binom)\\b', text), 'Raw TeX leaked into the PDF'
 document = pdfium.PdfDocument(str(path))
 for index in [0, len(document) // 2, len(document) - 1]:
     page = document[index]
@@ -169,6 +181,11 @@ async function run() {
       const rendered = await reader.locator('#preview-content [data-ge-rendered="true"].ge-math-source').count();
       throw new Error(`Expected ${fixture.formulas} rendered formulas in the reader, found ${rendered}`, { cause: error });
     });
+    const preview = reader.locator('#preview-content');
+    const renderedMath = '[data-ge-rendered="true"].ge-math-source';
+    assert.equal(await preview.locator('h2').filter({ hasText: 'Count distribution' }).locator(renderedMath).count(), 1);
+    assert.equal(await preview.locator('thead').locator(renderedMath).count(), 1);
+    assert.equal(await preview.locator('tbody').locator(renderedMath).count(), 2);
     const readerPreviewMs = Math.round(performance.now() - readerStarted);
     await reader.evaluate(() => {
       const render = GptExporterVendors.renderMathSvg;

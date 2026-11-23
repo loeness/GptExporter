@@ -240,6 +240,40 @@ test('wraps a long math paragraph while retaining styled text on the formula lin
   assert.equal(allText, `${before}variable linked explanation${after}`);
 });
 
+test('renders ordered formula images inside semantic table cells and headings', () => {
+  const formula = (label, width, height, classes = 'ge-snapshot-image ge-inline-math') =>
+    `<img class="${classes}" alt="TeX: ${label}" width="${width}" height="${height}" src="${png}">`;
+  const container = makeContainer(`<article data-message-id="selected"><h2>Assistant</h2>
+    <h3>标题${formula('heading', 48, 20)}<strong>结论</strong></h3>
+    <table><thead><tr><th>首列${formula('header', 48, 20)}</th><th>次列</th><th>末列</th></tr></thead>
+    <tbody><tr><td rowspan="2">跨行</td><td colspan="2">前文${formula('first', 48, 20)}<code>code</code>${formula('second', 48, 20)}<a href="https://example.com/">后文</a></td></tr>
+    <tr><td><img class="ge-snapshot-image" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAB9AAAAAg" alt="TeX: wide"></td><td>末尾</td></tr></tbody>
+    </table></article>`);
+  const definition = api.pdfDefinition({ messages: [selectedMessage], container, includeMetadata: false });
+  const heading = definition.content.find((node) => node.stack && definitionText(node).includes('标题'));
+  const headingLine = heading.stack[0].table.body[0];
+  assert.equal(headingLine[0].style, 'heading3');
+  assert.equal(headingLine[1].image, png);
+  assert.ok(headingLine[2].text.some((run) => run.text === '结论' && run.bold));
+
+  const { table } = definition.content.find((node) => node.table?.headerRows === 1);
+  assert.deepEqual(table.widths, ['*', '*', '*']);
+  const headerFormula = table.body[0][0].stack[0].table.body[0][1];
+  assert.equal(headerFormula.image, png);
+  assert.equal(headerFormula.width, headingLine[1].width);
+  assert.equal(table.body[1][0].rowSpan, 2);
+  assert.equal(table.body[1][1].colSpan, 2);
+  assert.deepEqual(table.body[2][0], '');
+  const cellLine = table.body[1][1].stack[0].table.body[0];
+  assert.equal(cellLine[1].image, png);
+  assert.ok(cellLine[2].text.some((run) => run.text === 'code' && run.color));
+  assert.equal(cellLine[3].image, png);
+  assert.ok(cellLine[4].text.some((run) => run.text === '后文' && run.link === 'https://example.com/'));
+  const wideFormula = table.body[2][1].stack[0].table.body[0][0];
+  assert.ok(wideFormula.image && wideFormula.width > 0 && wideFormula.width < 150);
+  assert.doesNotMatch(definitionText(heading) + definitionText(table), /TeX:/);
+});
+
 test('scales PDF typography and formula dimensions and reduces compact gaps', () => {
   const container = makeContainer(`<article data-message-id="selected"><h2>Assistant</h2><h3>Heading</h3>
     <p>Words <code>inline</code> around <img class="ge-inline-math" alt="TeX: x" width="20" height="12" src="${png}"> formula.</p>

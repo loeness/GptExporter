@@ -2,6 +2,7 @@
 
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
+const { createHash } = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -9,13 +10,15 @@ const { chromium } = require('playwright');
 
 const extension = path.resolve(__dirname, '../extension');
 const output = path.resolve(__dirname, '../test-results/large-export-' + Date.now());
-const configuredChromium = process.env.GPT_EXPORTER_CHROMIUM_EXECUTABLE;
+const bundledChromium = path.resolve(__dirname, '../../browsers/chromium-1194/chrome-win/chrome.exe');
+const configuredChromium = process.env.GPT_EXPORTER_CHROMIUM_EXECUTABLE || (fs.existsSync(bundledChromium) ? bundledChromium : undefined);
 const bundledPython = path.join(os.homedir(), '.cache', 'codex-runtimes', 'codex-primary-runtime', 'dependencies', 'python', 'python.exe');
 const python = process.env.GPT_EXPORTER_TEST_PYTHON || (fs.existsSync(bundledPython) ? bundledPython : 'python');
 const conversationId = '11111111-1111-4111-8111-111111111111';
 const messageCount = 320;
 const imageCount = 24;
 const highResolutionCount = 8;
+const pairedPhotoIndex = highResolutionCount + 1;
 const timeout = 180000;
 
 function marker(number) {
@@ -33,7 +36,12 @@ function conversationGraph() {
       : ' The notes are consistent with the earlier observations. Record the location and lighting for each photograph, and collect another sample from the same viewpoint. Keep the original notes alongside the revised summary.')];
     if (number % 12 === 1 && (number - 1) / 12 < imageCount) {
       const imageId = (number - 1) / 12;
-      parts.push({ content_type: 'image_asset_pointer', asset_pointer: `sediment://file-stress-photo-${imageId}` });
+      if (imageId !== pairedPhotoIndex + 1) {
+        parts.push({ content_type: 'image_asset_pointer', asset_pointer: `sediment://file-stress-photo-${imageId}` });
+      }
+      if (imageId === pairedPhotoIndex) {
+        parts.push({ content_type: 'image_asset_pointer', asset_pointer: `sediment://file-stress-photo-${imageId + 1}` });
+      }
     }
     mapping[id] = { id, parent, children: [], message: {
       id, author: { role: user ? 'user' : 'assistant' }, create_time: 1700000000 + number * 60,
@@ -45,30 +53,67 @@ function conversationGraph() {
   return { conversation_id: conversationId, title: 'Field visit notes and uploaded photographs', current_node: parent, mapping };
 }
 
-function inspectPdf(file) {
-  const source = [
-    'import sys, json, re, hashlib',
-    'from pypdf import PdfReader',
-    'reader = PdfReader(sys.argv[1])',
-    'text = "\\n".join(page.extract_text() or "" for page in reader.pages)',
-    'images = [image for page in reader.pages for image in page.images]',
-    'hashes = {hashlib.sha256(image.image.tobytes()).hexdigest() for image in images}',
-    'print(json.dumps({"markers": re.findall(r"STRESSMESSAGE[0-9]{4}", text), "images": len(images), "distinctImages": len(hashes), "pages": len(reader.pages)}))'
-  ].join('\n');
+function inspectPdf(file, originals) {
+  const source = `
+import sys, json, re, hashlib
+from pypdf import PdfReader
+from pypdf.generic import ContentStream
+reader = PdfReader(sys.argv[1])
+pair = {photo['digest'] for photo in json.loads(sys.argv[2])}
+text = '\\n'.join(page.extract_text() or '' for page in reader.pages)
+images = [image for page in reader.pages for image in page.images]
+hashes = {hashlib.sha256(image.image.tobytes()).hexdigest() for image in images}
+paired_draws = []
+for index, page in enumerate(reader.pages):
+    resources = page['/Resources'].get('/XObject', {})
+    transform = None
+    for args, operation in ContentStream(page.get_contents(), reader).operations:
+        if operation == b'cm':
+            transform = [float(value) for value in args]
+        if operation != b'Do':
+            continue
+        resource = resources[args[0]]
+        if resource['/Subtype'] != '/Image':
+            continue
+        digest = hashlib.sha256(resource.get_data()).hexdigest()
+        if digest in pair:
+            # PDFKit places an image after its own cm inside the page's top-down coordinate system.
+            width, _, _, height, _, offset = transform
+            top, bottom = sorted((offset, offset + height))
+            paired_draws.append(dict(digest=digest, page=index + 1, pixels=[int(resource['/Width']), int(resource['/Height'])],
+                                     width=abs(width), height=abs(height), top=top, bottom=bottom,
+                                     pageHeight=float(page.mediabox.height)))
+print(json.dumps(dict(markers=re.findall(r'STRESSMESSAGE[0-9]{4}', text), images=len(images),
+                      distinctImages=len(hashes), pages=len(reader.pages), pairedDraws=paired_draws)))
+`;
   const bytes = fs.statSync(file).size;
-  const pdf = JSON.parse(execFileSync(python, ['-c', source, file], { encoding: 'utf8', timeout }));
+  const pdf = JSON.parse(execFileSync(python, ['-c', source, file, JSON.stringify(originals)], { encoding: 'utf8', timeout }));
   assert.deepEqual(pdf.markers, Array.from({ length: messageCount }, (_, index) => marker(index + 1)), 'PDF retains every message in order');
   assert.equal(pdf.images, imageCount, 'PDF contains every uploaded image');
   assert.equal(pdf.distinctImages, imageCount, 'PDF contains distinct decoded image pixels');
   assert.ok(pdf.pages > 1, 'the transcript spans multiple pages');
-  return { bytes, pages: pdf.pages, images: pdf.images, distinctImages: pdf.distinctImages };
+  assert.deepEqual(pdf.pairedDraws.map(draw => draw.digest), originals.map(photo => photo.digest),
+    'both JPEG uploads are embedded byte-for-byte and drawn in order');
+  assert.equal(pdf.pairedDraws[0].page, pdf.pairedDraws[1].page, 'both uploads from a single message share a PDF page');
+  for (const [index, draw] of pdf.pairedDraws.entries()) {
+    const { width, height } = originals[index];
+    assert.deepEqual(draw.pixels, [width, height]);
+    assert.ok(draw.width > 100 && draw.height > 100, 'each photo is large enough to view');
+    assert.ok(draw.height < draw.pageHeight / 2, 'each photo leaves room for a second photo on the page');
+    assert.ok(draw.top >= 0 && draw.bottom <= draw.pageHeight, 'the entire photo fits on the page');
+    assert.ok(Math.abs(draw.width / draw.height - width / height) < 0.01, 'PDF drawing preserves the photo aspect ratio');
+  }
+  const [first, second] = pdf.pairedDraws;
+  assert.ok(first.bottom <= second.top,
+    'paired photos are stacked vertically without overlap');
+  return { bytes, pages: pdf.pages, images: pdf.images, distinctImages: pdf.distinctImages, pairedDraws: pdf.pairedDraws };
 }
 
 async function generateImage(page, index) {
-  return page.evaluate(({ index, highResolutionCount }) => {
+  return page.evaluate(({ index, highResolutionCount, pairedPhotoIndex }) => {
     const canvas = document.createElement('canvas');
     const large = index < highResolutionCount;
-    const portrait = index % 2 === 1;
+    const portrait = index % 2 === 1 || index === pairedPhotoIndex + 1;
     canvas.width = large ? (portrait ? 2400 : 3200) : (portrait ? 768 : 1024);
     canvas.height = large ? (portrait ? 3200 : 2400) : (portrait ? 1024 : 768);
     const ctx = canvas.getContext('2d');
@@ -101,7 +146,7 @@ async function generateImage(page, index) {
     ctx.fillStyle = 'white';
     ctx.fillText(`Field photo ${index + 1}`, canvas.width / 10, canvas.height / 2);
     return { width: canvas.width, height: canvas.height, data: canvas.toDataURL('image/jpeg', large ? 0.97 : 0.9).split(',')[1] };
-  }, { index, highResolutionCount });
+  }, { index, highResolutionCount, pairedPhotoIndex });
 }
 
 async function run() {
@@ -156,7 +201,8 @@ async function run() {
     let fixtureBytes = 0;
     for (let index = 0; index < imageCount; index++) {
       const { width, height, data } = await generateImage(chat, index);
-      fixtures.push({ width, height });
+      const digest = createHash('sha256').update(Buffer.from(data, 'base64')).digest('hex');
+      fixtures.push({ width, height, digest });
       fixtureBytes += Buffer.byteLength(data, 'base64');
       await worker.evaluate(({ index, data }) => {
         globalThis.stressFixtures.set(index, Uint8Array.fromBase64(data));
@@ -208,7 +254,8 @@ async function run() {
     await reader.locator('#pdf-preview-download').click();
     await (await readerDownloadPromise).saveAs(readerPath);
     const readerPdfMs = Math.round(performance.now() - readerPdfStarted);
-    const readerPdf = inspectPdf(readerPath);
+    const photoPair = fixtures.slice(pairedPhotoIndex, pairedPhotoIndex + 2);
+    const readerPdf = inspectPdf(readerPath, photoPair);
     console.log(`Reader preview completed in ${readerPreviewMs} ms and PDF downloaded in ${readerPdfMs} ms.`);
     await reader.close();
 
@@ -241,7 +288,7 @@ async function run() {
     assert.equal(context.pages().length, pagesBeforeQuick, 'quick PDF exports in place');
     const quickPath = path.join(output, 'quick.pdf');
     fs.copyFileSync(quickFile, quickPath);
-    const quickPdf = inspectPdf(quickPath);
+    const quickPdf = inspectPdf(quickPath, photoPair);
 
     assert.deepEqual(errors, []);
     assert.deepEqual(unexpectedRequests, []);
