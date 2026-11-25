@@ -41,6 +41,24 @@ flowchart LR
   B --> C[导出文档]
 ~~~
 
+等待时间密度出现在下方。
+
+$$f(x)=\lambda e^{-\lambda x},\qquad x\ge0$$
+
+Rate \(\lambda\)
+
+> **滑块**
+>
+> 当前值不可用。
+>
+> **范围：** 0.01 至 1
+>
+> **步长：** 0.01
+
+---
+
+静态曲线之后应保留此段说明 CTMC-PDF-FIXTURE。
+
 | 项目 | 状态 |
 | --- | --- |
 | 历史与分支 | 完整 |
@@ -78,10 +96,23 @@ function readPdfContent(file){
     'bodyFontSizes=[]',
     "text='\\n'.join(page.extract_text(visitor_text=lambda text,cm,tm,font,size: bodyFontSizes.append(size) if 'ABC123' in text else None) or '' for page in reader.pages)",
     "attachments={name:[base64.b64encode(data).decode('ascii') for data in files] for name,files in reader.attachments.items()}",
-    'images=sum(len(page.images) for page in reader.pages)',
-    "print(json.dumps({'text':text,'images':images,'attachments':attachments,'pages':len(reader.pages),'bodyFontSizes':bodyFontSizes},ensure_ascii=False))"
+    'images=[entry.image.convert("RGB") for page in reader.pages for entry in page.images]',
+    "chartColors=[dict((color,count) for count,color in image.getcolors(image.width*image.height)) for image in images if image.size==(1440,800)]",
+    "chartCurvePixels=[[colors.get(color,0) for color in [(21,101,168),(115,63,153),(178,77,21)]] for colors in chartColors]",
+    "print(json.dumps({'text':text,'images':len(images),'chartCurvePixels':chartCurvePixels,'attachments':attachments,'pages':len(reader.pages),'bodyFontSizes':bodyFontSizes},ensure_ascii=False))"
   ].join(';');
   return JSON.parse(execFileSync(pythonExecutable,['-c',source,file],{encoding:'utf8'}));
+}
+function assertStaticChart(pdf){
+  assert.match(pdf.text,/等待时间密度出现在下方/);
+  assert.match(pdf.text,/指数分布概率密度（静态图）/);
+  assert.match(pdf.text,/示例速率/);
+  assert.match(pdf.text,/静态曲线之后应保留此段说明 CTMC-PDF-FIXTURE/);
+  assert.doesNotMatch(pdf.text,/滑块|当前值不可用|范围：|步长：/,'obsolete slider controls are excluded');
+  assert.doesNotMatch(pdf.text,/输入数据|本地处理|导出文档/,'Mermaid remains excluded from PDF');
+  assert.equal(pdf.images,5,'PDF embeds the original image, three formulas and one static chart');
+  assert.equal(pdf.chartCurvePixels.length,1,'PDF embeds one chart-sized raster image');
+  assert.ok(pdf.chartCurvePixels[0].every(count=>count>300),'embedded chart must include all three colored curves');
 }
 function renderPdfFirstPage(file,png){
   const source="import sys; import pypdfium2 as pdfium; document=pdfium.PdfDocument(sys.argv[1]); document[0].render(scale=1.6).to_pil().save(sys.argv[2])";
@@ -152,7 +183,9 @@ function isPdfFile(file){
     for(const label of ['输入数据','本地处理','导出文档'])assert.ok(diagramText.includes(label),'Mermaid label missing: '+label);
     assert.equal(await reader.locator('svg.ge-mermaid-diagram foreignObject').count(),0);
     checks.push('page SELECT to full reader','KaTeX rendering','Mermaid rendering');
-    await reader.waitForSelector('#preview-content img[src^="data:image/"]');
+    const uploadedImage='#preview-content img[src^="data:image/"]:not(.ge-static-demo-image)';
+    await reader.waitForSelector(uploadedImage);
+    await reader.waitForSelector('#preview-content figure.ge-static-demo img.ge-static-demo-image');
     assert.doesNotMatch(await reader.locator('#preview-content').innerText(), /TOOL_SECRET_FIXTURE|THINKING_SECRET_FIXTURE|turn0search0/);
     assert.equal(await reader.locator('#preview-content article[data-role="user"]').count(),9);
     assert.equal(await reader.locator('#preview-content article[data-role="assistant"]').count(),9);
@@ -161,7 +194,7 @@ function isPdfFile(file){
     await reader.waitForFunction(()=>!document.getElementById('load-media').disabled);
     const assetResponses=await reader.evaluate(async ids=>{const exportId=new URL(location.href).searchParams.get('id');return Promise.all(ids.map(assetId=>chrome.runtime.sendMessage({type:'GPT_EXPORTER_ASSET',exportId,assetId})));},model.assets.map(asset=>asset.id));
     fs.writeFileSync(path.join(output,'media-debug.json'),JSON.stringify({assets:model.assets,assetResponses,status:await reader.locator('#status-line').innerText(),preview:await reader.locator('#preview-content').innerHTML()},null,2));
-    assert.equal(await reader.locator('#preview-content img[src^="data:image/"]').count(),1);
+    assert.equal(await reader.locator(uploadedImage).count(),1);
     await reader.waitForSelector('#preview-content a[download="notes.txt"]');
     checks.push('signed raster media via approved background transport','attachment original bytes in memory');
     await reader.screenshot({path:path.join(output,'rich-reader.png'),fullPage:false});
@@ -185,7 +218,7 @@ function isPdfFile(file){
     assert.match(exported,/data:image\/png;base64,/);assert.doesNotMatch(exported,/<script\b|<iframe\b|<svg\b|src="https?:/i);
     const offline=await context.newPage();await offline.goto('file:///'+htmlPath.replace(/\\/g,'/'));
     assert.ok(await offline.locator('img').count()>=3,'HTML should embed image, equation snapshots and diagram');
-    assert.equal(await offline.locator('img[alt^="TeX:"]').count(),2,'both inline and display formulas must be preserved visually');
+    assert.equal(await offline.locator('img[alt^="TeX:"]').count(),3,'inline and display formulas must be preserved visually');
     const attachmentPromise=offline.waitForEvent('download');await offline.locator('a[download="notes.txt"]').click();
     const attachmentDownload=await attachmentPromise;
     assert.equal(fs.readFileSync(await attachmentDownload.path(),'utf8'),'附件原始内容：保留字节。\nfixture attachment\n');
@@ -244,7 +277,7 @@ function isPdfFile(file){
     assert.doesNotMatch(initialPdf.content.text,/TOOL_SECRET_FIXTURE|THINKING_SECRET_FIXTURE|turn0search0|另一个分支的回答/);
     assert.ok(!initialPdf.content.text.replace(/\s/g,'').includes(readerTimestamp.replace(/\s/g,'')),'Reader PDF excludes message timestamps');
     assert.doesNotMatch(initialPdf.content.text,/整理消息|搜索消息内容|复制 Markdown|系统打印|下载到本地设备/,'Reader controls are excluded from the PDF');
-    assert.equal(initialPdf.content.images,3,'the preview retains the uploaded image and both formulas');
+    assertStaticChart(initialPdf.content);
     assert.doesNotMatch(initialPdf.content.text,/notes\.txt/,'assistant attachment notices are excluded from the Reader PDF');
     assert.deepEqual(initialPdf.content.attachments,{},'the Reader PDF excludes files attached to assistant messages');
     const fontSize=reader.locator('#pdf-font-size');
@@ -344,11 +377,11 @@ function isPdfFile(file){
     assert.doesNotMatch(allQuickText,/另一个分支的回答/,'All must not include the alternative branch');
     assert.equal((allQuickText.match(/历史问题 \d+，/g)||[]).length,8,'All includes the eight historical user turns');
     assert.equal((allQuickText.match(/历史回答 \d+\.\d+：/g)||[]).length,80,'All includes all eight numbered historical assistant answers');
-    assert.equal(allQuick.images,3,'All quick PDF embeds the uploaded image and both formulas');
+    assertStaticChart(allQuick);
     assert.doesNotMatch(allQuickText,/notes\.txt/,'assistant attachment notices are excluded from the quick PDF');
     assert.deepEqual(allQuick.attachments,{},'All quick PDF excludes files attached to assistant messages');
     const quickPdfPreviewPath=renderPdfFirstPage(allQuick.file,path.join(output,'quick-all-page-1.png'));
-    checks.push('All quick PDF contains complete current-branch history, the original image, and both formulas');
+    checks.push('Reader preview and All quick PDF retain complete history, image, formulas and a nonblank static chart');
     const questionsQuick=await quickPdf('questions',9);const questionsQuickText=questionsQuick.text;
     assert.match(questionsQuickText,/完整历史测试：请保留数学、图表和附件/);
     for(let index=1;index<=8;index++)assert.match(questionsQuickText,new RegExp('历史问题 '+index));

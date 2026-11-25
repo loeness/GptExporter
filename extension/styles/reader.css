@@ -295,6 +295,9 @@ body[data-theme="dark"] .status-line[data-kind="error"] { border-color: #68433e;
 .paper-content ul, .paper-content ol { margin: .5em 0 1em; padding-left: 1.45em; }
 .paper-content li { margin: .25em 0; padding-left: .1em; }
 .paper-content blockquote { margin: 1em 0; padding: 1px 0 1px 16px; border-left: 3px solid #b4c7bd; color: #626d68; }
+.paper-content .ge-static-demo { margin: 0.65em 0; }
+.paper-content .ge-static-demo img { display: block; margin-inline: auto; border: 1px solid #dfe8e2; border-radius: 8px; }
+.paper-content .ge-static-demo-caption { margin-top: 0.35em; color: #65716b; font-size: 0.8em; }
 .paper-content pre { overflow: auto; margin: 1em 0; padding: 14px 16px; border: 1px solid #e5e7e1; border-radius: 6px; color: #39423e; background: #f6f7f3; font: 12px/1.65 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; }
 .paper-content code { padding: .1em .32em; border-radius: 4px; color: #43564d; background: #eef1ec; font: .86em ui-monospace, SFMono-Regular, Consolas, monospace; }
 .paper-content pre code { padding: 0; background: transparent; }

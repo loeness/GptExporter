@@ -503,6 +503,7 @@
     if (!container || !container.ownerDocument) return;
     const document = container.ownerDocument;
     refreshRichAssets(container, conversation);
+    api.restoreStaticDemos?.(container);
     const katex = unwrapVendor('katex') || root.katex;
     const purifier = getPurifier();
     for (const placeholder of Array.from(container.querySelectorAll('[data-ge-math="true"]'))) {
