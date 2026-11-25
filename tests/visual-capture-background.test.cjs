@@ -161,9 +161,13 @@ test('stores only linked visual metadata on non-ChatGPT pages and relays verifie
   assert.equal(result.asset.name, 'diagram.png');
   assert.equal(env.calls.decode, 0);
   assert.deepEqual(JSON.parse(JSON.stringify(env.calls.relay)), [[7,{type:'GPT_EXPORTER_GET_VISUAL_CAPTURE',assetId:captureId,url},{frameId:0}]]);
+  env.tab.url = url + '#diagram';
+  assert.equal((await env.send(request, reader)).asset.dataUrl, original);
+  env.tab.url = url + '#/another-conversation';
+  assert.equal((await env.send(request, reader)).ok, false);
   env.tab.url = url + '-other';
   assert.equal((await env.send(request, reader)).ok, false);
-  assert.equal(env.calls.relay.length, 1);
+  assert.equal(env.calls.relay.length, 2);
 });
 
 test('prioritizes captures within the existing ChatGPT asset cap and rejects invalid relay data', async () => {

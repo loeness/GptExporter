@@ -510,8 +510,19 @@
     };
   }
 
+  function capturePageKey(value) {
+    if (typeof value !== "string") return "";
+    const marker = value.indexOf("#");
+    if (marker < 0) return value;
+    const fragment = value.slice(marker + 1);
+    // A heading anchor stays within the conversation. A hash-router path can open another.
+    if (fragment.startsWith("/") || fragment.startsWith("!/")) return value;
+    return value.slice(0, marker);
+  }
+
   namespace.supportedPlatforms = supportedPlatforms;
   namespace.getPlatform = getPlatform;
+  namespace.capturePageKey = capturePageKey;
   namespace.collectPlatformConversation = collectPlatformConversation;
   namespace.isExcludedContentElement = isExcludedContentElement;
   namespace.isMessageVisible = isMessageVisible;

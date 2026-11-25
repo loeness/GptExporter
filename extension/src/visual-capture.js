@@ -17,7 +17,7 @@
   let watching = false;
 
   function syncRoute() {
-    const current = root.location.href;
+    const current = api.capturePageKey(root.location.href);
     if (route === current) return;
     close();
     route = current;
@@ -111,14 +111,17 @@
 
   function isCurrent(current, revision) {
     syncRoute();
-    return view === current && current.revision === revision && !document.hidden;
+    if (view !== current || current.revision !== revision || document.hidden) return false;
+    if (current.anchor === (api.captureBranchAnchor?.(document) || '')) return true;
+    forgetRegion('当前对话的消息或分支已变化，请重新框选。');
+    return false;
   }
 
   async function requestCapture(region) {
     let timer;
     try {
       return await Promise.race([
-        root.chrome.runtime.sendMessage({ type: 'GPT_EXPORTER_CAPTURE_REGION', url: route, region }),
+        root.chrome.runtime.sendMessage({ type: 'GPT_EXPORTER_CAPTURE_REGION', url: root.location.href, region }),
         new Promise((_, reject) => {
           timer = setTimeout(() => reject(new Error('截图超时，请重试。')), CAPTURE_TIMEOUT);
         })
@@ -178,20 +181,25 @@
     }
   }
 
-  function save(response) {
-    if (frames.at(-1)?.dataUrl === response.dataUrl) return 'duplicate';
+  function repeatsLastCapture(anchor, response) {
+    const last = frames.at(-1);
+    return last?.anchor === anchor && last.dataUrl === response.dataUrl;
+  }
+
+  function save(anchor, response) {
+    if (repeatsLastCapture(anchor, response)) return 'duplicate';
     const bytes = frames.reduce((total, frame) => total + frame.size, 0);
     if (frames.length >= MAX_FRAMES || bytes + response.size > MAX_BYTES) return 'limit';
     frames.push({
       id: `visual-capture-${root.crypto.randomUUID()}`,
       name: `可视化截图 ${frames.length + 1}.png`,
-      dataUrl: response.dataUrl, mimeType: 'image/png', size: response.size
+      dataUrl: response.dataUrl, mimeType: 'image/png', size: response.size, anchor
     });
     return 'saved';
   }
 
   function saveFrame(current, response) {
-    const result = save(response);
+    const result = save(current.anchor, response);
     if (result === 'limit') {
       stopRecording(current);
       status('已达到 24 帧或 24 MiB 上限。可撤销最后一帧或清空后再试。');
@@ -216,7 +224,7 @@
   async function record(current, revision, initial = false) {
     const response = await capture(current, revision);
     if (!response || !isCurrent(current, revision)) return;
-    if (frames.at(-1)?.dataUrl === response.dataUrl) {
+    if (repeatsLastCapture(current.anchor, response)) {
       current.candidate = null;
     } else if (initial || current.candidate === response.dataUrl) {
       if (saveFrame(current, response) === 'limit') return;
@@ -334,6 +342,7 @@
         return;
       }
       current.region = region;
+      current.anchor = api.captureBranchAnchor?.(document) || '';
       setSelecting(current, false);
       status('区域已选定。可操作页面，然后保存或录制。');
     });
@@ -400,11 +409,11 @@
     },
     getFrames() {
       syncRoute();
-      return frames.map(({ id, name, size }) => ({ id, name, size }));
+      return frames.map(({ id, size, anchor }) => ({ id, size, anchor }));
     },
     getFrame(assetId, url) {
       syncRoute();
-      if (url !== route) return undefined;
+      if (api.capturePageKey(url) !== route) return undefined;
       const frame = frames.find(frame => frame.id === assetId);
       if (!frame) return undefined;
       const { dataUrl, mimeType, size, name } = frame;

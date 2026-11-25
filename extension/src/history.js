@@ -691,6 +691,18 @@
       .filter((article) => visible(article));
   }
 
+  function captureBranchAnchor(doc) {
+    const candidates = domCandidates(doc);
+    for (let index = candidates.length - 1; index >= 0; index -= 1) {
+      const element = candidates[index];
+      const role = element.getAttribute("data-message-author-role");
+      if ((role !== "assistant" && role !== "user") || !element.getClientRects().length) continue;
+      const id = cleanString(element.getAttribute("data-message-id") || element.getAttribute("data-id"), 250).trim();
+      if (id) return id;
+    }
+    return "";
+  }
+
   function mediaMimeType(url, fallback, name) {
     const extensionFrom = (value) => {
       const match = cleanString(value, 500).toLowerCase().match(/\.([a-z0-9]{1,10})(?:$|[?#])/);
@@ -944,5 +956,6 @@
   api.normalizeConversation = normalizeConversation;
   api.requestPageSnapshot = requestPageSnapshot;
   api.collectConversation = collectConversation;
+  api.captureBranchAnchor = captureBranchAnchor;
   api.resolveAsset = resolveAsset;
 })(globalThis);

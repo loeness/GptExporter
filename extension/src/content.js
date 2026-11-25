@@ -6,9 +6,18 @@
   const api = globalThis.GptExporter;
   let busy = false, closeTimer = 0;
 
-  function appendVisualCaptures(conversation) {
-    const frames = api.visualCapture?.getFrames() || [];
-    if (!frames.length) return;
+  function captureBranch(conversation, anchor) {
+    const branches = conversation.branches || [];
+    if (!anchor) return branches.length <= 1 ? (branches[0] || null) : undefined;
+    const leaf = branches.find(branch => branch.leafId === anchor);
+    if (leaf) return leaf;
+    const matches = branches.filter(branch => branch.messageIds.includes(anchor));
+    if (matches.length === 1) return matches[0];
+    if (!branches.length && conversation.messages.some(message => message.id === anchor)) return null;
+    return undefined;
+  }
+
+  function appendCaptureSection(conversation, branch, frames) {
     const title = '采集的图表与演示';
     const id = 'visual-capture-section-' + frames[0].id;
     const entries = frames.map((frame, index) => ({
@@ -23,8 +32,7 @@
       html: `<h3>${title}</h3>` + entries.map(({label, target}) => `<p><img src="${target}" alt="${label}"></p>`).join(''),
       assetIds: frames.map(frame => frame.id)
     };
-    const current = conversation.branches?.find(branch => branch.id === conversation.activeBranchId);
-    if (current) current.messageIds.push(id);
+    branch?.messageIds.push(id);
     conversation.messages.push(message);
     conversation.assets = [
       ...entries.map(({frame, label}) => ({
@@ -35,13 +43,37 @@
     ];
   }
 
+  function appendVisualCaptures(conversation) {
+    const frames = api.visualCapture?.getFrames() || [];
+    if (!frames.length) return;
+    const groups = new Map();
+    let skipped = 0;
+    for (const frame of frames) {
+      const branch = captureBranch(conversation, frame.anchor);
+      if (branch === undefined) {
+        skipped++;
+        continue;
+      }
+      if (!groups.has(branch)) groups.set(branch, []);
+      groups.get(branch).push(frame);
+    }
+    for (const [branch, items] of groups) appendCaptureSection(conversation, branch, items);
+    if (skipped) {
+      conversation.warnings = [`${skipped} 张采集画面的所属分支无法确认。请在原分支重新采集。`, ...(conversation.warnings || [])];
+    }
+  }
+
   async function collect() {
     const url = location.href;
     const platform = api.getPlatform(url);
     if (!platform) throw new Error('当前网站暂不支持对话导出。');
     const conversation = platform.id === 'chatgpt' ? await api.collectConversation({document, url}) : api.collectPlatformConversation({document, url});
-    if (url !== location.href) throw new Error('对话已切换，请在当前对话重新导出。');
-    if (conversation) appendVisualCaptures(conversation);
+    const currentUrl = location.href;
+    if (api.capturePageKey(url) !== api.capturePageKey(currentUrl)) throw new Error('对话已切换，请在当前对话重新导出。');
+    if (conversation) {
+      conversation.url = currentUrl;
+      appendVisualCaptures(conversation);
+    }
     if (!conversation?.messages.length) throw new Error(`未识别到 ${platform.label} 对话消息，请打开具体对话并等待加载；页面结构变化时可能需要更新适配。`);
     return conversation;
   }

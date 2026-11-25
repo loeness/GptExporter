@@ -14,6 +14,9 @@ const bundledPython = path.join(os.homedir(), '.cache', 'codex-runtimes', 'codex
 const python = process.env.GPT_EXPORTER_TEST_PYTHON || (fs.existsSync(bundledPython) ? bundledPython : 'python');
 const chatUrl = 'https://chat.qwen.ai/chat/visual-capture-fixture';
 const demoUrl = 'https://flow-fixture.invalid/demo';
+const branchConversationId = 'd7b8ad43-e4d3-49f0-a871-26eb7177560c';
+const branchUrl = 'https://chatgpt.com/c/' + branchConversationId;
+const branchApiUrl = 'https://chatgpt.com/backend-api/conversation/' + branchConversationId;
 const chartColor = [154, 52, 180];
 const firstColor = [210, 52, 33];
 const secondColor = [29, 103, 191];
@@ -21,7 +24,7 @@ const expectedColors = [chartColor, firstColor, secondColor, firstColor];
 
 const chatHtml = `<!doctype html><meta charset="utf-8"><title>Visual capture fixture</title><link rel="icon" href="data:,">
   <main><div class="qwen-chat-message-user" data-message-id="u1"><div class="message-content"><p>Show chart and steps.</p></div></div>
-  <div class="qwen-chat-message-assistant" data-message-id="a1"><div class="message-content"><p>VISUAL_CAPTURE_FIXTURE</p></div></div>
+  <div class="qwen-chat-message-assistant" data-message-id="a1"><div class="message-content"><p id="capture-fixture-anchor">VISUAL_CAPTURE_FIXTURE</p></div></div>
   <svg id="source-chart" style="position:fixed;left:50px;top:150px" width="240" height="160" aria-label="Fixture chart">
     <rect width="240" height="160" fill="rgb(${chartColor.join(',')})"/>
   </svg>
@@ -46,6 +49,36 @@ const demoHtml = `<!doctype html><meta charset="utf-8"><title>External flow fixt
     });
     draw();
   </script>`;
+
+const branchQuestion = 'Show a chart in each alternative answer.';
+const branchAnswers = { 'branch-a': 'Branch A chart.', 'branch-b': 'Branch B chart.' };
+const branchHtml = `<!doctype html><meta charset="utf-8"><title>Branch capture fixture</title><link rel="icon" href="data:,">
+  <main>
+    <article data-testid="conversation-turn-1"><div data-message-author-role="user" data-message-id="branch-user"><p>${branchQuestion}</p></div></article>
+    <article data-testid="conversation-turn-2"><div data-message-author-role="assistant" data-message-id="branch-a"><p>${branchAnswers['branch-a']}</p>
+      <svg id="branch-chart" style="position:fixed;left:50px;top:150px" width="240" height="160" aria-label="Branch fixture chart">
+        <rect width="240" height="160" fill="rgb(${firstColor.join(',')})"/>
+      </svg>
+    </div></article>
+  </main>`;
+
+function branchGraph(activeBranch) {
+  const node = (id, parent, children, role, text) => ({
+    id, parent, children,
+    message: { id, author: { role }, content: { content_type: 'text', parts: [text] }, metadata: {} }
+  });
+  return {
+    conversation_id: branchConversationId,
+    title: 'Branch capture fixture',
+    current_node: activeBranch,
+    mapping: {
+      root: { id: 'root', parent: null, children: ['branch-user'], message: null },
+      'branch-user': node('branch-user', 'root', ['branch-a', 'branch-b'], 'user', branchQuestion),
+      'branch-a': node('branch-a', 'branch-user', [], 'assistant', branchAnswers['branch-a']),
+      'branch-b': node('branch-b', 'branch-user', [], 'assistant', branchAnswers['branch-b'])
+    }
+  };
+}
 
 async function selectRegion(chat, host, source, width, height) {
   const box = await source.boundingBox();
@@ -146,6 +179,73 @@ async function assertOfflineHtml(context, reader, output) {
   await offline.close();
 }
 
+async function captureDetails(reader, count) {
+  const images = reader.locator('#preview-content img[alt^="画面 "]');
+  await reader.waitForFunction(expected => {
+    const captures = Array.from(document.querySelectorAll('#preview-content img[alt^="画面 "]'));
+    return captures.length === expected && captures.every(image => image.complete && image.naturalWidth > 0);
+  }, count);
+  return images.evaluateAll(captures => captures.map(image => {
+    const canvas = document.createElement('canvas');
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const context = canvas.getContext('2d');
+    context.drawImage(image, 0, 0);
+    return {
+      label: image.alt,
+      size: [canvas.width, canvas.height],
+      pixel: Array.from(context.getImageData(canvas.width >> 1, canvas.height >> 1, 1, 1).data)
+    };
+  }));
+}
+
+async function assertBranchCaptures(context, extensionUrl, switchBranch) {
+  const popup = await context.newPage();
+  await popup.goto(extensionUrl + '/popup.html');
+  const chat = await context.newPage();
+  await chat.goto(branchUrl);
+  await chat.bringToFront();
+  await chat.locator('#gpt-exporter-launcher').waitFor();
+  await popup.evaluate(() => { document.getElementById('start-visual-capture').click(); });
+  const host = chat.locator('#gpt-exporter-visual-capture');
+  const chart = chat.locator('#branch-chart');
+  await selectRegion(chat, host, chart, 160, 100);
+  await host.locator('#save').click();
+  await waitForFrames(host, 1);
+
+  switchBranch('branch-b');
+  await chat.evaluate(({ text, color }) => {
+    const answer = document.querySelector('[data-message-id="branch-a"]');
+    answer.dataset.messageId = 'branch-b';
+    answer.querySelector('p').textContent = text;
+    answer.querySelector('rect').setAttribute('fill', color);
+  }, { text: branchAnswers['branch-b'], color: 'rgb(' + secondColor.join(',') + ')' });
+  assert.equal(chat.url(), branchUrl, 'Switching the mounted answer preserves the conversation URL');
+  await selectRegion(chat, host, chart, 160, 100);
+  await host.locator('#save').click();
+  await waitForFrames(host, 2);
+  await host.locator('#close').click();
+
+  const page = context.waitForEvent('page');
+  await chat.locator('#gpt-exporter-select').click();
+  const reader = await page;
+  const preview = reader.locator('#preview-content');
+  await preview.getByText(branchAnswers['branch-b'], { exact: true }).waitFor();
+  const branchSelect = reader.locator('#branch-select');
+  assert.equal(await branchSelect.locator('option').count(), 3, 'Reader loaded both API branches');
+  const active = await branchSelect.inputValue();
+  const alternative = (await branchSelect.locator('option').evaluateAll(options => options.map(option => option.value)))
+    .find(id => id !== active && id !== '__all');
+  assert.ok(alternative);
+  assert.deepEqual((await captureDetails(reader, 1)).map(capture => capture.pixel), [[...secondColor, 255]],
+    'The active branch exports only the capture taken on branch B');
+
+  await branchSelect.selectOption(alternative);
+  await preview.getByText(branchAnswers['branch-a'], { exact: true }).waitFor();
+  assert.deepEqual((await captureDetails(reader, 1)).map(capture => capture.pixel), [[...firstColor, 255]],
+    'Selecting branch A in the reader restores only the capture taken on branch A');
+}
+
 async function run() {
   const tempRoot = fs.realpathSync(os.tmpdir());
   const tempPrefix = 'gpt-exporter-visual-capture-';
@@ -169,9 +269,14 @@ async function run() {
       viewport: null,
       args: ['--window-size=1200,900', '--force-device-scale-factor=1', '--disable-extensions-except=' + extension, '--load-extension=' + extension]
     });
+    let activeBranch = 'branch-a';
     await context.route(/^https?:\/\//, route => {
       const url = route.request().url();
-      const body = url === chatUrl ? chatHtml : url === demoUrl ? demoHtml : null;
+      if (url === 'https://chatgpt.com/api/auth/session') {
+        return route.fulfill({ json: { accessToken: 'fixture-only-token' } });
+      }
+      if (url === branchApiUrl) return route.fulfill({ json: branchGraph(activeBranch) });
+      const body = url === chatUrl ? chatHtml : url === demoUrl ? demoHtml : url === branchUrl ? branchHtml : null;
       return body ? route.fulfill({ contentType: 'text/html; charset=utf-8', body }) : route.abort();
     });
     const worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
@@ -204,32 +309,17 @@ async function run() {
     await host.locator('#record').click();
     await host.locator('#close').click();
 
+    await chat.evaluate(() => { location.hash = 'capture-fixture-anchor'; });
+    assert.equal(chat.url(), chatUrl + '#capture-fixture-anchor');
     const page = context.waitForEvent('page');
     await chat.locator('#gpt-exporter-select').click();
     const reader = await page;
-    const images = reader.locator('#preview-content img[alt^="画面 "]');
-    await images.last().waitFor();
-    await reader.waitForFunction(() => {
-      const images = Array.from(document.querySelectorAll('#preview-content img[alt^="画面 "]'));
-      return images.length === 4 && images.every(image => image.complete && image.naturalWidth > 0);
-    });
-    const captures = await images.evaluateAll(images => images.map(image => {
-      const canvas = document.createElement('canvas');
-      canvas.width = image.naturalWidth;
-      canvas.height = image.naturalHeight;
-      const context = canvas.getContext('2d');
-      context.drawImage(image, 0, 0);
-      return {
-        label: image.alt,
-        size: [canvas.width, canvas.height],
-        pixel: Array.from(context.getImageData(canvas.width >> 1, canvas.height >> 1, 1, 1).data)
-      };
-    }));
+    const captures = await captureDetails(reader, expectedColors.length);
     assert.deepEqual(captures, expectedColors.map((rgb, index) => ({
       label: `画面 ${index + 1}`,
       size: (index === 0 ? chartSize : flowSize).map(value => value * scale),
       pixel: [...rgb, 255]
-    })));
+    })), 'Fragment navigation within the conversation preserves all original captures');
     await assertOfflineHtml(context, reader, temp);
     await assertPdfExports(context, chat, reader, worker, temp);
 
@@ -240,7 +330,8 @@ async function run() {
     await nextReader.locator('#preview-content').getByText('VISUAL_CAPTURE_FIXTURE').waitFor();
     assert.equal(await nextReader.locator('#preview-content img[alt^="画面 "]').count(), 0, 'Captures are scoped to the original conversation');
 
-    console.log('Visual capture browser regression passed: SVG, cross-origin A → B → A, reader, both PDF paths, offline HTML and route isolation.');
+    await assertBranchCaptures(context, extensionUrl, branch => { activeBranch = branch; });
+    console.log('Visual capture browser regression passed: SVG, cross-origin A → B → A, reader, both PDF paths, offline HTML, fragment retention and conversation and branch isolation.');
   } finally {
     await context?.close();
     assert.equal(path.dirname(temp), tempRoot);

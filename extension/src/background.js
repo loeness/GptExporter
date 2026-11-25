@@ -5,6 +5,7 @@ importScripts('platforms.js');
 const SESSION_PREFIX = 'export:';
 const MAX_BYTES = 8 * 1024 * 1024;
 const MAX_AGE = 24 * 60 * 60 * 1000;
+const PREVIEW_CACHE_FULL = '预览缓存已满，请在已有预览中点击“清除”后重试。';
 const MAX_ASSETS = 300;
 const assetLookups = new Map();
 const MAX_IMAGE_EDGE = 1800;
@@ -29,6 +30,12 @@ let directPhase = '准备文档';
 
 function supportedPage(value) {
   return Boolean(globalThis.GptExporter.getPlatform(value));
+}
+
+function sameCapturePage(left, right) {
+  const pageKey = globalThis.GptExporter.capturePageKey;
+  const source = pageKey(left);
+  return Boolean(source) && source === pageKey(right);
 }
 
 function trustedSender(sender) {
@@ -132,7 +139,7 @@ function modelFromSender(input, sender) {
   model.source.sourceTabId = !fromPopup && Number.isInteger(sender?.tab?.id) ? sender.tab.id :
     (Number.isInteger(input.source?.sourceTabId) ? input.source.sourceTabId : undefined);
   if (model.assets.some(asset => asset.visualCapture) && !fromPopup &&
-      (sender.frameId !== 0 || sender.url !== model.url || !Number.isInteger(sender.tab?.id))) {
+      (sender.frameId !== 0 || !sameCapturePage(sender.url, model.url) || !Number.isInteger(sender.tab?.id))) {
     throw new Error(CAPTURE_SOURCE_ERROR);
   }
   return model;
@@ -145,15 +152,20 @@ async function storeExport(model) {
   const stale = entries.filter(([, value]) => !value?.createdAt || Date.now() - value.createdAt > MAX_AGE);
   if (stale.length) await chrome.storage.session.remove(stale.map(([key]) => key));
   // Keep existing open previews intact. Ask the user to clear them instead of evicting data silently.
-  const existingBytes = new TextEncoder().encode(JSON.stringify(Object.fromEntries(
-    entries.filter(([key]) => !stale.some(([oldKey]) => oldKey === key))
-  ))).length;
+  const liveEntries = entries.filter(([key]) => !stale.some(([oldKey]) => oldKey === key));
+  const existingBytes = new TextEncoder().encode(JSON.stringify(Object.fromEntries(liveEntries))).length;
   if (existingBytes + modelBytes > 9 * 1024 * 1024) {
-    throw new Error('预览缓存已满，请在已有预览中点击“清除”后重试。');
+    throw new Error(PREVIEW_CACHE_FULL);
   }
   const id = crypto.randomUUID();
   const key = SESSION_PREFIX + id;
-  await chrome.storage.session.set({[key]: model});
+  try {
+    await chrome.storage.session.set({[key]: model});
+  } catch (error) {
+    // Chrome's session quota measures allocated memory, which can exceed the JSON size.
+    if (!error?.message?.startsWith('Session storage quota bytes exceeded')) throw error;
+    throw new Error(liveEntries.length ? PREVIEW_CACHE_FULL : '当前对话超过浏览器预览缓存上限，请使用快捷导出。');
+  }
   return {id, key};
 }
 
@@ -372,7 +384,7 @@ async function captureRegion(message, sender) {
   const tabId = sender.tab?.id;
   const windowId = sender.tab?.windowId;
   if (sender.id !== chrome.runtime.id || sender.frameId !== 0 ||
-      (sender.documentLifecycle && sender.documentLifecycle !== 'active') || !supportedPage(url) || sender.url !== url ||
+      (sender.documentLifecycle && sender.documentLifecycle !== 'active') || !supportedPage(url) || !sameCapturePage(sender.url, url) ||
       !Number.isInteger(tabId) || tabId < 0 || !Number.isInteger(windowId) || windowId < 0) throw new Error(CAPTURE_SOURCE_ERROR);
   if (!region || ![region.x,region.y,region.width,region.height,region.viewportWidth,region.viewportHeight].every(Number.isFinite) ||
       (region.devicePixelRatio !== undefined && (!Number.isFinite(region.devicePixelRatio) || region.devicePixelRatio <= 0)) ||
@@ -391,7 +403,7 @@ async function captureRegion(message, sender) {
   const events = [[chrome.tabs.onActivated,onActivated], [chrome.tabs.onUpdated,onUpdated], [chrome.windows.onFocusChanged,onFocusChanged]];
   async function requireCurrentTab() {
     const [tab,window] = await Promise.all([chrome.tabs.get(tabId),chrome.windows.get(windowId)]);
-    if (changed || !window.focused || tab.windowId !== windowId || !tab.active || tab.url !== url || tab.pendingUrl) {
+    if (changed || !window.focused || tab.windowId !== windowId || !tab.active || !sameCapturePage(tab.url, url) || tab.pendingUrl) {
       throw new Error(CAPTURE_SOURCE_ERROR);
     }
   }
@@ -421,7 +433,7 @@ async function readVisualCapture(model, asset) {
   let response;
   try {
     const tab = await chrome.tabs.get(tabId);
-    if (tab.url !== model.url || tab.pendingUrl) throw new Error(CAPTURE_SOURCE_ERROR);
+    if (!sameCapturePage(tab.url, model.url) || tab.pendingUrl) throw new Error(CAPTURE_SOURCE_ERROR);
     response = await withTimeout(chrome.tabs.sendMessage(tabId, {
       type:'GPT_EXPORTER_GET_VISUAL_CAPTURE',assetId:asset.id,url:model.url
     }, {frameId:0}), 10000, '原对话未及时返回截图。');

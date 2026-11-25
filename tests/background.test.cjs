@@ -18,7 +18,11 @@ function setup(options = {}) {
         return options.failRender?{ok:false,error:'fixture render failed'}:{ok:true,url:'blob:chrome-extension://test-id/generated',missingAssets:0};
       }},
     storage: {session: {
-      async get() { return {...records}; }, async set(values) { Object.assign(records, values); },
+      async get() { return {...records}; },
+      async set(values) {
+        if (options.storageError) throw new Error(options.storageError);
+        Object.assign(records, values);
+      },
       async remove(keys) { for (const key of Array.isArray(keys) ? keys : [keys]) delete records[key]; }
     }},
     tabs: {async create(value) { if (options.failOpen) throw new Error('tab failed'); tabs.push(value); },
@@ -61,6 +65,20 @@ test('rolls back session record if opening preview fails', async () => {
   const env = setup({failOpen: true});
   assert.equal((await env.send({type: 'GPT_EXPORTER_OPEN', conversation: model()})).ok, false);
   assert.deepEqual(Object.keys(env.records), []);
+});
+test('reports a Chrome session quota error without evicting existing previews', async () => {
+  const storageError = 'Session storage quota bytes exceeded. Values were not stored.';
+  const records = {'export:active': {createdAt: Date.now(), title: 'Keep this preview'}};
+  const request = {type: 'GPT_EXPORTER_OPEN', conversation: model()};
+  const full = setup({records, storageError});
+  assert.match((await full.send(request)).error, /预览缓存已满.*清除/);
+  assert.deepEqual(full.records, records);
+  assert.equal(full.tabs.length, 0);
+
+  const empty = setup({storageError});
+  assert.match((await empty.send(request)).error, /超过浏览器预览缓存上限.*快捷导出/);
+  assert.deepEqual(empty.records, {});
+  assert.equal(empty.tabs.length, 0);
 });
 test('serializes concurrent launches without losing data', async () => {
   const env = setup();
