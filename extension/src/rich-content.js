@@ -133,12 +133,18 @@
     return `<span class="ge-math-source" data-ge-math="true" data-ge-display="${display ? 'true' : 'false'}" data-ge-tex="${escapeHtml(tex)}">${escapeHtml(tex)}</span>`;
   }
 
-  function protectMathSegment(source, replacements) {
+  function protectMathSegment(source, replacements, allowWidgets) {
     const value = String(source || '');
     const code = [];
     const nonce = `${Date.now().toString(36)}${(idCounter++).toString(36)}`;
-    const codePattern = /(`+)([\s\S]*?)\1/g;
-    const withoutInlineCode = value.replace(codePattern, (match) => {
+    const codeOrWidget = /(`+)([\s\S]*?)\1|\uE200genui\uE202([^\uE200\uE201]*)\uE201/g;
+    const withoutInlineCode = value.replace(codeOrWidget, (match, _ticks, _code, widget) => {
+      if (widget !== undefined) {
+        if (!allowWidgets || !api.dataChartPlaceholder) return match;
+        const token = `GEWIDGETPLACEHOLDER${nonce}X${replacements.length}X`;
+        replacements.push([token, api.dataChartPlaceholder(widget)]);
+        return token;
+      }
       const token = `GEINLINECODE${nonce}X${code.length}X`;
       code.push([token, match]);
       return token;
@@ -159,14 +165,14 @@
     return result;
   }
 
-  function protectMath(markdown) {
+  function protectMath(markdown, allowWidgets) {
     const lines = String(markdown || '').split(/(?<=\n)/);
     const output = [];
     const replacements = [];
     let fence = null;
     let pending = '';
     const flush = () => {
-      if (pending) output.push(protectMathSegment(pending, replacements));
+      if (pending) output.push(protectMathSegment(pending, replacements, allowWidgets));
       pending = '';
     };
     for (const line of lines) {
@@ -194,7 +200,7 @@
     const md = makeMarkdownRenderer();
     if (!md) return String(message && message.html || `<p>${escapeHtml(markdown).replace(/\r?\n/g, '<br>')}</p>`);
     try {
-      const protectedContent = protectMath(markdown);
+      const protectedContent = protectMath(markdown, message?.role === 'assistant');
       let html = md.render(protectedContent.markdown);
       for (const [token, markup] of protectedContent.replacements) html = html.split(token).join(markup);
       return html;
@@ -504,6 +510,8 @@
     const document = container.ownerDocument;
     refreshRichAssets(container, conversation);
     api.restoreStaticDemos?.(container);
+    api.restoreFlowDemos?.(container);
+    api.restoreDataCharts?.(container);
     const katex = unwrapVendor('katex') || root.katex;
     const purifier = getPurifier();
     for (const placeholder of Array.from(container.querySelectorAll('[data-ge-math="true"]'))) {
@@ -715,16 +723,100 @@
     '.ge-mermaid-diagram', '.mermaid', 'img[alt^="Mermaid diagram: "]',
     'img[src^="data:image/svg+xml" i]'
   ].join(',');
-  const SVG_OPEN = /^(?:\s*<\?xml\s[\s\S]*?\?>)?(?:\s*<!DOCTYPE\s+svg\b[^>]*>)?\s*<svg(?=[\s/>])/i;
-  const SVG_CLOSE = /<\/svg\s*>|^\s*<svg\b[^>]*\/\s*>/i;
+  const SVG_OPEN = /^\s*(?:(?:<\?(?:[^?]|\?(?!>))*\?>|<!--(?:[^-]|-(?!->))*-->)\s*)*(?:<!DOCTYPE\s+svg\b|<svg(?=[\s/>]))/i;
+  const SVG_CLOSE = /<\/svg\s*>|<svg\b(?:[^>"']|"[^"]*"|'[^']*')*\/\s*>/i;
   const PDF_ASSET_MARKER = /^\[(?:Attachment|Image): [^\r\n]*\]$/;
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const SVG_DIAGRAM_TAGS = new Set('svg g defs marker rect circle ellipse path line polyline polygon text tspan title desc'.split(' '));
+  const SVG_NUMBER = /[+-]?(?:\d*\.\d+|\d+\.?\d*)(?:e[+-]?\d+)?/gi;
+  const SVG_LENGTH = /^[+-]?(?:\d*\.\d+|\d+\.?\d*)(?:e[+-]?\d+)?(?:px|em|rem|pt|%)?$/i;
+  const SVG_LENGTH_ATTRS = new Set(('x y x1 y1 x2 y2 cx cy r rx ry width height dx dy refX refY markerWidth markerHeight ' +
+    'stroke-width stroke-dashoffset stroke-miterlimit font-size letter-spacing textLength opacity fill-opacity stroke-opacity').split(' '));
+  const SVG_PAINT_ATTRS = new Set(['color', 'fill', 'stroke']);
+  const SVG_ENUM_ATTRS = new Set(('preserveAspectRatio fill-rule clip-rule stroke-linecap stroke-linejoin font-weight font-style text-anchor ' +
+    'dominant-baseline alignment-baseline baseline-shift lengthAdjust markerUnits role aria-hidden vector-effect').split(' '));
+  const PDF_TIMELINE_TITLE = /^(?:timeline|gantt)\b|\b(?:project|implementation|evaluation|research|experiment|alternate|proposed)\s+timeline\b|\bgantt\s+chart\b|时间线|时间轴|甘特图/i;
+  const MAX_DIAGRAM_SOURCE = 200000;
+
+  function boundedSvgNumbers(value, syntax) {
+    const numbers = Array.from(value.matchAll(SVG_NUMBER), ([number]) => Number(number));
+    return syntax.test(value.replace(SVG_NUMBER, '0')) && numbers.every((number) => Number.isFinite(number) && Math.abs(number) <= 1e6);
+  }
+
+  function validDiagramAttribute(element, { name, value }) {
+    if (name === 'xmlns') return element.localName === 'svg' && value === SVG_NS;
+    if (name === 'id') return /^[A-Za-z_][\w.:-]{0,100}$/.test(value);
+    if (SVG_LENGTH_ATTRS.has(name)) return SVG_LENGTH.test(value) && Math.abs(parseFloat(value)) <= 1e6;
+    if (SVG_PAINT_ATTRS.has(name)) return /^(?:#[\da-f]{3,8}|[a-z]{1,24}|rgba?\([\d.,%\s]+\)|hsla?\([\d.,%\s]+\))$/i.test(value);
+    if (SVG_ENUM_ATTRS.has(name)) return /^[\w\s.%+-]{1,80}$/.test(value);
+    if (name === 'font-family') return /^[\w\s,'"-]{1,120}$/.test(value);
+    if (name === 'aria-label') return value.length <= 300;
+    if (name === 'd') return value.length <= 20000 && boundedSvgNumbers(value, /^[0\s,.MmZzLlHhVvCcSsQqTtAa]+$/);
+    if (['viewBox', 'points', 'stroke-dasharray'].includes(name)) {
+      return (name === 'stroke-dasharray' && value === 'none') || (value.length <= 12000 && boundedSvgNumbers(value, /^[0\s,]+$/));
+    }
+    if (name === 'transform') return value.length <= 400 && boundedSvgNumbers(value, /^(?:\s*(?:matrix|translate|scale|rotate|skewX|skewY)\([0\s,]+\)[\s,]*)+$/);
+    if (name === 'orient') return value === 'auto' || value === 'auto-start-reverse' || boundedSvgNumbers(value, /^0(?:deg|rad|grad|turn)?$/);
+    if (['marker-start', 'marker-mid', 'marker-end'].includes(name)) {
+      return !element.closest('marker') && (value === 'none' || /^url\(#[A-Za-z_][\w.:-]{0,100}\)$/.test(value));
+    }
+    return false;
+  }
+
+  function diagramSize(width, height) {
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0 ||
+        width / height > 30 || height / width > 30) return null;
+    const scale = Math.min(1, 1600 / width, 2400 / height);
+    return { width: Math.ceil(width * scale), height: Math.ceil(height * scale) };
+  }
+
+  function parseDiagramSvg(source, document) {
+    if (source.length > MAX_DIAGRAM_SOURCE || /<!\s*(?:DOCTYPE|ENTITY)\b/i.test(source)) return null;
+    const Parser = document.defaultView?.DOMParser || root.DOMParser;
+    if (!Parser) return null;
+    const parsed = new Parser().parseFromString(source.trim(), 'image/svg+xml');
+    const svg = parsed.documentElement;
+    if (svg?.localName !== 'svg' || Array.from(parsed.childNodes).some((node) => node.nodeType === 7)) return null;
+    const ids = new Map();
+    const references = [];
+    const pending = [[svg, 0]];
+    let count = 0;
+    while (pending.length) {
+      const [element, depth] = pending.pop();
+      if (++count > 1500 || depth > 64) return null;
+      if (!SVG_DIAGRAM_TAGS.has(element.localName) || element.prefix || element.namespaceURI !== svg.namespaceURI ||
+          (svg.namespaceURI !== null && svg.namespaceURI !== SVG_NS) ||
+          (element !== svg && element.localName === 'svg') ||
+          Array.from(element.childNodes).some((node) => ![1, 3, 8].includes(node.nodeType))) return null;
+      for (const attribute of element.attributes) {
+        if (!validDiagramAttribute(element, attribute)) return null;
+        if (attribute.name === 'id') {
+          if (ids.has(attribute.value)) return null;
+          ids.set(attribute.value, element.localName);
+        }
+        if (attribute.name.startsWith('marker-') && attribute.value.startsWith('url(#')) references.push(attribute.value.slice(5, -1));
+      }
+      for (const child of element.children) pending.push([child, depth + 1]);
+    }
+    if (references.some((id) => ids.get(id) !== 'marker')) return null;
+    const box = svg.getAttribute('viewBox')?.trim().split(/[\s,]+/).map(Number);
+    if (box && (box.length !== 4 || !box.every(Number.isFinite) || box[2] <= 0 || box[3] <= 0)) return null;
+    const width = svg.getAttribute('width')?.match(/^\d+(?:\.\d+)?(?:px)?$/) ? parseFloat(svg.getAttribute('width')) : box?.[2];
+    const height = svg.getAttribute('height')?.match(/^\d+(?:\.\d+)?(?:px)?$/) ? parseFloat(svg.getAttribute('height')) : box?.[3];
+    const size = diagramSize(width, height);
+    if (!size) return null;
+    if (!box) svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    svg.setAttribute('xmlns', SVG_NS);
+    return { svg, size, title: svg.getAttribute('aria-label') || svg.querySelector('title')?.textContent.trim() };
+  }
 
   function svgMarkup(text) {
+    if (/^\s*</.test(text)) return text;
     return text.replace(/&(?:lt|#0*60|#x0*3c);/gi, '<')
       .replace(/&(?:gt|#0*62|#x0*3e);/gi, '>');
   }
 
-  function removeDiagramBlock(element, container) {
+  function diagramBlock(element, container) {
     // Lift an artifact out of an otherwise empty wrapper so its caption can be found.
     let block = element;
     while (block.parentElement !== container && block.parentElement?.matches('p, pre, figure, div:not(.message-body)') &&
@@ -732,21 +824,45 @@
              (child.nodeType === 3 && !child.textContent.trim()) || child.localName === 'br')) {
       block = block.parentElement;
     }
+    return block;
+  }
+
+  function diagramHeading(block) {
     const heading = block.previousElementSibling;
     const title = heading?.textContent.trim() || '';
     const boldParagraph = heading?.matches('p') && heading.firstElementChild?.matches('strong, b') &&
       heading.firstElementChild.textContent.trim() === title;
-    if (heading?.matches('h1, h2, h3, h4, h5, h6, p') &&
-        !heading.matches('article > h2') &&
-        /(?:\b(?:timeline|diagram|mermaid|svg|flowchart)\b|时间线|时间轴|流程图|示意图|图表)/i.test(title) &&
-        (heading.matches('h1, h2, h3, h4, h5, h6') || (boldParagraph && !/[.!?。！？]$/.test(title)) ||
-         /^(?:timeline|diagram|flowchart|时间线|时间轴|流程图|示意图|图表)\s*[:：]?$/i.test(title))) {
+    if (!heading?.matches('article > h2') && (heading?.matches('h1, h2, h3, h4, h5, h6') || boldParagraph ||
+        (heading?.matches('p') && /^(?:timeline|gantt|diagram|flowchart|时间线|时间轴|流程图|示意图|图表)\s*[:：]?$/i.test(title)))) return heading;
+    return null;
+  }
+
+  function removeDiagramBlock(block, heading) {
+    const title = heading?.textContent.trim() || '';
+    if (heading && (heading.localName !== 'p' || !/[.!?。！？]$/.test(title)) &&
+        /(?:\b(?:timeline|gantt|diagram|mermaid|svg|flowchart)\b|时间线|时间轴|流程图|示意图|图表|甘特图)/i.test(title)) {
       heading.remove();
     }
     block.remove();
   }
 
-  function filterPdfContent(clone) {
+  function replacePdfDiagram(element, clone, jobs, source, type, continuation = []) {
+    const block = diagramBlock(element, clone);
+    const heading = diagramHeading(block);
+    const title = heading?.textContent.trim() || '';
+    const mermaidType = type === 'mermaid' && /^\s*(?:%%[^\r\n]*\r?\n\s*)*([a-z]+)/i.exec(source)?.[1]?.toLowerCase();
+    if (jobs && type && !PDF_TIMELINE_TITLE.test(title) && mermaidType !== 'timeline' && mermaidType !== 'gantt') {
+      const label = type === 'mermaid' ? 'Mermaid diagram' : 'SVG diagram';
+      const node = textElement(clone.ownerDocument, 'p', 'ge-diagram-unavailable', `图表不可用（${label}）`);
+      block.replaceWith(node);
+      jobs.push({ node, source, type, title: title.slice(0, 150), supported: type === 'svg' || ['flowchart', 'graph'].includes(mermaidType) });
+    } else {
+      removeDiagramBlock(block, heading);
+    }
+    for (const paragraph of continuation) paragraph.remove();
+  }
+
+  function filterPdfContent(clone, jobs) {
     for (const element of clone.querySelectorAll(PDF_OMITTED_CONTENT)) element.remove();
     for (const paragraph of clone.querySelectorAll('.message-body > p')) {
       // History import appends these markers as plain paragraphs. An image or
@@ -764,15 +880,25 @@
     }
     for (const element of clone.querySelectorAll(`${PDF_DIAGRAM}, svg, pre, p`)) {
       if (!clone.contains(element) || element.closest('[data-ge-math], .katex, .katex-display')) continue;
+      if (element.matches('[data-ge-mermaid-error], .ge-mermaid-error')) {
+        element.remove();
+        continue;
+      }
       if (element.matches(`${PDF_DIAGRAM}, svg, pre:has(> code.language-svg), pre:has(> code.language-mermaid)`)) {
-        removeDiagramBlock(element, clone);
+        const mermaid = element.getAttribute('data-ge-mermaid-source') ||
+          (element.matches('[data-ge-mermaid], .ge-mermaid-source-fallback, .mermaid, pre:has(> code.language-mermaid)') ? element.textContent : '');
+        const svg = element.matches('svg') ? element.outerHTML :
+          element.querySelector(':scope > code.language-svg')?.textContent;
+        replacePdfDiagram(element, clone, jobs, mermaid || svg || '', mermaid ? 'mermaid' : svg ? 'svg' : null);
         continue;
       }
       const source = svgMarkup(element.textContent);
       if (!SVG_OPEN.test(source) || element.querySelector('img, table, [data-ge-math]')) continue;
       if (element.matches('pre') || SVG_CLOSE.test(source)) {
         const closing = SVG_CLOSE.exec(source);
-        if (element.matches('pre') || !source.slice(closing.index + closing[0].length).trim()) removeDiagramBlock(element, clone);
+        if (element.matches('pre') || !source.slice(closing.index + closing[0].length).trim()) {
+          replacePdfDiagram(element, clone, jobs, source, 'svg');
+        }
         continue;
       }
       // Markdown can produce separate paragraphs inside a standalone SVG block.
@@ -781,8 +907,8 @@
         const part = svgMarkup(next.textContent);
         continuation.push(next);
         if (/<\/svg\s*>\s*$/i.test(part)) {
-          removeDiagramBlock(element, clone);
-          for (const paragraph of continuation) paragraph.remove();
+          const complete = [source, ...continuation.map((paragraph) => svgMarkup(paragraph.textContent))].join('\n');
+          replacePdfDiagram(element, clone, jobs, complete, 'svg', continuation);
           break;
         }
       }
@@ -795,9 +921,9 @@
     }
   }
 
-  function safeSnapshotClone(container, purpose) {
+  function safeSnapshotClone(container, purpose, pdfDiagrams) {
     const clone = container.cloneNode(true);
-    if (purpose === 'pdf') filterPdfContent(clone);
+    if (purpose === 'pdf') filterPdfContent(clone, pdfDiagrams);
     if (clone.nodeType === 1) clone.removeAttribute('style');
     for (const svg of Array.from(clone.querySelectorAll('svg'))) {
       const source = svg.getAttribute('data-ge-mermaid-source') || '';
@@ -862,9 +988,37 @@
     return clone;
   }
 
-  async function snapshotRichContent(container, { onProgress, purpose } = {}) {
+  async function rasterizePdfDiagram(job, document) {
+    if (!job.supported) return;
+    let diagram;
+    if (job.type === 'svg') {
+      diagram = parseDiagramSvg(job.source, document);
+    } else {
+      if (job.source.length > 30000) return;
+      const scratch = document.createElement('div');
+      const source = textElement(document, 'pre', '', job.source);
+      scratch.append(source);
+      if (!await renderMermaid(source, unwrapVendor('mermaid') || root.mermaid, document)) return;
+      const svg = scratch.firstElementChild;
+      svg.removeAttribute('data-ge-mermaid-source');
+      const viewBox = svg.getAttribute('viewBox')?.trim().split(/[\s,]+/).map(Number);
+      const size = viewBox?.length === 4 ? diagramSize(viewBox[2], viewBox[3]) : null;
+      if (size) diagram = { svg, size };
+    }
+    if (!diagram) return;
+    if (PDF_TIMELINE_TITLE.test(diagram.title || '')) {
+      job.node.remove();
+      return;
+    }
+    const data = await svgCanvas(diagram.svg, document, diagram.size);
+    if (data) replaceWithSnapshotImage(job.node, data, job.title || diagram.title?.slice(0, 150) ||
+      (job.type === 'svg' ? 'SVG diagram' : 'Mermaid diagram'), diagram.size);
+  }
+
+  async function snapshotRichContent(container, { onProgress, purpose, includeDiagrams = false } = {}) {
     if (!container || typeof container.cloneNode !== 'function') throw new TypeError('富内容容器无效');
-    const clone = safeSnapshotClone(container, purpose);
+    const pdfDiagrams = purpose === 'pdf' && includeDiagrams === true ? [] : null;
+    const clone = safeSnapshotClone(container, purpose, pdfDiagrams);
     const document = clone.ownerDocument || root.document;
     const host = document && document.body;
     const formulas = clone.querySelectorAll('[data-ge-math="true"][data-ge-rendered="true"]');
@@ -882,7 +1036,7 @@
     try {
       // Read every layout before replacing any node. Measuring after each
       // replacement would repeatedly reflow the entire conversation.
-      const total = formulas.length + diagrams.length;
+      const total = formulas.length + diagrams.length + (pdfDiagrams?.length || 0);
       if (total) onProgress?.({ completed: 0, total });
       const measuredFormulas = Array.from(formulas, (node) => measureMath(node, document));
       const measuredDiagrams = Array.from(diagrams, (node) => ({ node, size: measureSvg(node) }));
@@ -931,6 +1085,10 @@
           node.replaceWith(fallback);
         }
       });
+      for (const job of pdfDiagrams || []) {
+        await rasterizePdfDiagram(job, document);
+        await reportProgress();
+      }
       for (const element of Array.from(clone.querySelectorAll('[data-ge-image-placeholder], [data-ge-image-ref], [data-ge-asset-id], [data-ge-math], [data-ge-mermaid], [data-ge-mermaid-error], [data-ge-snapshot-measuring]'))) {
         if (element.hasAttribute('data-ge-image-placeholder') || element.hasAttribute('data-ge-image-ref') || element.hasAttribute('data-ge-asset-id')) {
           element.replaceWith(textElement(document, 'span', 'ge-unavailable-image', element.getAttribute('data-ge-alt') || '图片不可用'));

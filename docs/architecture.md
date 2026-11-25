@@ -31,7 +31,9 @@ Claude / Qwen / DeepSeek / Kimi / Gemini / 豆包 / Grok
 
 HTML 在解析、渲染和快照导出时清理。预览自动读取当前选择的图片，文件附件在用户导出或点击嵌入时读取。服务工作线程处理后的媒体保留在 reader 或 offscreen 文档内存中。预览每批只更新对应图片和附件，不重绘整篇对话。没有不受限的 URL 抓取接口。导出器不把消息或 Mermaid 指令当作操作授权。
 
-PDF 由本地 pdfmake 生成，正文使用内嵌 NotoSansCJK Unicode 字体。PDF 快照保留用户和助手的内容并过滤导出元数据、生成图表、引用与内部信息。快照准备时先统一测量公式布局，再使用本地 MathJax 绘制，同次导出会复用相同布局下的公式位图。HTML 保留已净化的 Mermaid 图表与公式图片，Markdown/JSON 保留源码。
+PDF 由本地 pdfmake 生成，正文使用内嵌 NotoSansCJK Unicode 字体。PDF 快照过滤导出元数据、引用和内部信息。准备快照时先统一测量公式布局，再使用本地 MathJax 绘制，同次导出会复用相同布局下的公式位图。HTML 保留已净化的 Mermaid 图表与公式图片，Markdown/JSON 保留源码。
+
+受支持的折线图仅解析结构化数据，增广演示根据经校验的路径和残量重建网络。两种方式都在本机生成静态图片。PDF 预览可选用安全的 Mermaid 流程图和独立 SVG 光栅图。SVG 以严格的元素和属性白名单解析，再隔离绘制为图片。
 
 PDF 分页预览使用 Chromium 的本地 PDF 查看器。调整字号、紧凑度、纸张或方向时复用当前快照，重新排版后替换 PDF Blob。下载保存当前预览的同一份 PDF。快捷导出使用相同过滤与默认排版，直接通过 downloads API 保存。
 

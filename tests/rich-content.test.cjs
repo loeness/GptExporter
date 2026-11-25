@@ -409,3 +409,102 @@ test('PDF snapshots omit generated diagrams, citations, and export metadata whil
   assert.match(htmlSnapshot.textContent, /\[Attachment: notes\.txt\]/);
   assert.ok(container.querySelector('.ge-mermaid-diagram'));
 });
+
+test('opt-in PDF diagrams rasterize proof SVG and Mermaid and omit timelines and unsafe source', async () => {
+  const { window } = dom;
+  const api = global.GptExporter;
+  const proof = '<svg viewBox="0 0 340 135" width="100%" xmlns="http://www.w3.org/2000/svg">' +
+    '<defs><marker id="sat14" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto">' +
+    '<path d="M0 0L6 3L0 6Z" fill="#2563eb"/></marker></defs>' +
+    '<rect x="10" y="10" width="110" height="115" rx="17" fill="#2563eb" fill-opacity=".07" stroke="#2563eb" stroke-dasharray="4 3"/>' +
+    '<text x="275" y="30" text-anchor="middle" fill="currentColor" font-size="13">B*</text>' +
+    '<circle cx="65" cy="75" r="16" fill="#2563eb"/>' +
+    '<line x1="82" y1="75" x2="258" y2="75" stroke="#2563eb" stroke-width="3" marker-end="url(#sat14)"/>' +
+    '<text x="170" y="65" text-anchor="middle" fill="#2563eb" font-size="14">10/10</text></svg>';
+  const raw = '<svg viewBox="0 0 60 40">\n\n<text x="10" y="20">Raw label</text>\n\n</svg>';
+  const fenced = (language, source) => `\`\`\`${language}\n${source}\n\`\`\``;
+  const unsafe = [
+    '<style>text { fill: url(https://tracker.example/style); }</style>',
+    '<image href="https://tracker.example/image"/>',
+    '<text style="fill: red">Styled SVG source</text>',
+    '<text onclick="alert(1)">Action SVG source</text>',
+    '<line marker-end="url(https://tracker.example/marker)"/>',
+    '<path d="M0 0L1e999 20"/>',
+    '<a href="javascript:alert(1)"><text>Link SVG source</text></a>',
+    '<?xml-stylesheet href="https://tracker.example/sheet"?>'
+  ].map((content) => fenced('svg', `<svg viewBox="0 0 40 40">${content}</svg>`));
+  unsafe.push(fenced('svg', '<!DOCTYPE svg [<!ENTITY label "Injected entity">]><svg viewBox="0 0 40 40"><text>&label;</text></svg>'));
+  const conversation = { messages: [{ id: 'proof', role: 'assistant', markdown: [
+    '### 性质一：所有 A → B 的边都必须饱和', fenced('svg', proof),
+    '### Raw proof diagram', raw,
+    '### Dependency flowchart', fenced('mermaid', '%% Comment before the graph\ngraph LR\n A-->B'),
+    '### Project timeline', fenced('svg', proof),
+    fenced('svg', '<svg viewBox="0 0 10 10"><title>Timeline of the project</title></svg>'),
+    fenced('mermaid', '%% Comment before the timeline\ntimeline\n  title Project milestones'),
+    fenced('mermaid', 'gantt\n  title Project schedule'),
+    fenced('mermaid', 'sequenceDiagram\n  Alice->>Bob: Hi'),
+    ...unsafe,
+    'The proof conclusion remains.'
+  ].join('\n\n') }] };
+  const container = document.createElement('div');
+  container.innerHTML = api.renderHtmlFragment(conversation);
+
+  const oldImage = window.Image;
+  const oldContext = window.HTMLCanvasElement.prototype.getContext;
+  const oldToDataURL = window.HTMLCanvasElement.prototype.toDataURL;
+  const urls = new Map();
+  const blobs = [];
+  const dimensions = [];
+  window.URL.createObjectURL = (blob) => {
+    const url = `blob:diagram-${blobs.length}`;
+    blobs.push(blob);
+    urls.set(url, blob);
+    return url;
+  };
+  window.URL.revokeObjectURL = (url) => urls.delete(url);
+  window.Image = class {
+    set src(url) {
+      assert.ok(urls.has(url));
+      assert.equal(document.querySelector('[data-ge-snapshot-measuring] svg:not(.katex svg)'), null);
+      queueMicrotask(() => this.onload());
+    }
+  };
+  window.HTMLCanvasElement.prototype.getContext = function () {
+    return { drawImage: (_image, _x, _y, width, height) => dimensions.push([this.width, this.height, width, height]) };
+  };
+  window.HTMLCanvasElement.prototype.toDataURL = () => imageData;
+  try {
+    const defaultPdf = await api.snapshotRichContent(container, { purpose: 'pdf' });
+    assert.equal(blobs.length, 0);
+    assert.doesNotMatch(defaultPdf.textContent, /<svg|Raw proof diagram|Dependency flowchart|Project timeline|A-->B|图表不可用/);
+
+    const pdf = await api.snapshotRichContent(container, { purpose: 'pdf', includeDiagrams: true });
+    const images = Array.from(pdf.querySelectorAll('img'), (image) => [image.alt, image.width, image.height, image.src]);
+    assert.deepEqual(images, [
+      ['性质一：所有 A → B 的边都必须饱和', 340, 135, imageData],
+      ['Raw proof diagram', 60, 40, imageData],
+      ['Dependency flowchart', 20, 10, imageData]
+    ]);
+    assert.deepEqual(dimensions, [[680, 270, 680, 270], [120, 80, 120, 80], [40, 20, 40, 20]]);
+    assert.equal(pdf.querySelectorAll('svg, pre, code, script, object, iframe').length, 0);
+    assert.match(pdf.textContent, /性质一：所有 A → B 的边都必须饱和/);
+    assert.match(pdf.textContent, /The proof conclusion remains\./);
+    assert.match(pdf.textContent, /图表不可用（Mermaid diagram）/);
+    assert.equal((pdf.textContent.match(/图表不可用（SVG diagram）/g) || []).length, unsafe.length);
+    assert.doesNotMatch(pdf.innerHTML, /tracker\.example|timeline|gantt|javascript:|SVG source|Injected entity|data-ge-mermaid-source|A--&gt;B/);
+    assert.equal(blobs.length, 3);
+    const [proofBlob, rawBlob, flowBlob] = await Promise.all(blobs.map((blob) => blob.text()));
+    assert.match(proofBlob, /marker-end="url\(#sat14\)"/);
+    assert.match(proofBlob, /fill="currentColor"/);
+    assert.match(rawBlob, /<svg[^>]*xmlns="http:\/\/www\.w3\.org\/2000\/svg"/);
+    assert.match(flowBlob, /safe diagram/);
+    assert.doesNotMatch(flowBlob, /tracker\.example|foreignObject|<script/);
+    assert.equal(urls.size, 0);
+  } finally {
+    window.Image = oldImage;
+    window.HTMLCanvasElement.prototype.getContext = oldContext;
+    window.HTMLCanvasElement.prototype.toDataURL = oldToDataURL;
+    delete window.URL.createObjectURL;
+    delete window.URL.revokeObjectURL;
+  }
+});

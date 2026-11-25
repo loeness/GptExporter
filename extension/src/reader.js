@@ -37,7 +37,7 @@
       'theme-toggle', 'clear-data', 'preview-paper', 'preview-content', 'preview-empty',
       'load-error', 'error-title', 'error-detail', 'reload-demo', 'status-line',
       'source-caption', 'branch-select', 'source-quality', 'load-media', 'pdf-page-size', 'pdf-orientation',
-      'pdf-preview-dialog', 'pdf-font-size', 'pdf-font-value', 'pdf-density', 'close-pdf-preview',
+      'pdf-preview-dialog', 'pdf-font-size', 'pdf-font-value', 'pdf-density', 'pdf-include-diagrams', 'close-pdf-preview',
       'pdf-preview-frame', 'pdf-preview-status', 'pdf-preview-download', 'pdf-preview-open', 'pdf-preview-retry'
     ].forEach((id) => { els[id] = byId(id); });
   }
@@ -506,7 +506,8 @@
       fontSize: Number(els['pdf-font-size'].value),
       density: els['pdf-density'].value,
       pageSize: els['pdf-page-size'].value,
-      orientation: els['pdf-orientation'].value
+      orientation: els['pdf-orientation'].value,
+      includeDiagrams: els['pdf-include-diagrams'].checked
     };
   }
 
@@ -534,19 +535,26 @@
     const { GptExporter: api } = root;
     job.running = true;
     try {
-      if (!job.snapshot) {
+      if (!job.prepared) {
         showPdfStatus('正在读取所选图片与附件…');
         job.missing = await hydrateSelectedAssets();
-        if (activePdfPreview !== job) return;
-        showPdfStatus('正在准备公式…');
-        job.snapshot = await api.snapshotRichContent(els['preview-content'], {
-          purpose: 'pdf',
-          onProgress: ({completed, total}) => {
-            if (activePdfPreview === job) showPdfStatus(`正在处理公式 ${completed}/${total}…`);
-          }
-        });
+        job.prepared = true;
       }
       while (activePdfPreview === job) {
+        const includeDiagrams = job.layout.includeDiagrams;
+        if (!job.snapshot || job.snapshotIncludesDiagrams !== includeDiagrams) {
+          job.snapshot = null;
+          showPdfStatus('正在准备公式和图表…');
+          job.snapshot = await api.snapshotRichContent(els['preview-content'], {
+            purpose: 'pdf', includeDiagrams,
+            onProgress: ({completed, total}) => {
+              if (activePdfPreview === job) showPdfStatus(`正在处理公式和图表 ${completed}/${total}…`);
+            }
+          });
+          if (activePdfPreview !== job) return;
+          job.snapshotIncludesDiagrams = includeDiagrams;
+          if (job.layout.includeDiagrams !== includeDiagrams) continue;
+        }
         const layout = job.layout;
         showPdfStatus('正在生成分页预览…');
         const content = await api.buildPdf({
@@ -606,7 +614,7 @@
     const job = activePdfPreview;
     if (!job?.blob || job.running || job.downloading) return;
     job.downloading = true;
-    const controls = ['pdf-font-size', 'pdf-density', 'pdf-page-size', 'pdf-orientation', 'pdf-preview-download'];
+    const controls = ['pdf-font-size', 'pdf-density', 'pdf-page-size', 'pdf-orientation', 'pdf-include-diagrams', 'pdf-preview-download'];
     controls.forEach(id => { els[id].disabled = true; });
     showPdfStatus('正在保存 PDF…');
     try {
@@ -717,7 +725,7 @@
       els['pdf-font-value'].textContent = `${els['pdf-font-size'].value} pt`;
       requestPdfPreview(160);
     });
-    for (const id of ['pdf-font-size', 'pdf-density', 'pdf-page-size', 'pdf-orientation']) {
+    for (const id of ['pdf-font-size', 'pdf-density', 'pdf-page-size', 'pdf-orientation', 'pdf-include-diagrams']) {
       els[id].addEventListener('change', () => requestPdfPreview());
     }
     els['reload-demo'].addEventListener('click', () => { root.location.search = '?demo=1'; });

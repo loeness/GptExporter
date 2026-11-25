@@ -24,7 +24,7 @@
   const SAFE_DATA_ATTRS = new Set([
     'data-message-id', 'data-ge-math', 'data-ge-display', 'data-ge-tex', 'data-ge-rendered',
     'data-ge-image-placeholder', 'data-ge-image-index', 'data-ge-alt', 'data-ge-image-ref',
-    'data-ge-asset-id', 'data-ge-mermaid', 'data-ge-mermaid-error', 'data-role'
+    'data-ge-asset-id', 'data-ge-mermaid', 'data-ge-mermaid-error', 'data-ge-data-chart', 'data-role'
   ]);
   const EXCLUDED_CONTENT = [
     '[data-citation]', '[data-citation-id]', '[data-annotation-type="citation" i]',
@@ -170,6 +170,7 @@
         if (SAFE_DATA_ATTRS.has(name)) {
           const value = attribute.value;
           if (name === 'data-role' && (tag !== 'article' || !/^(?:user|assistant|system|tool|function|developer)$/.test(value.toLowerCase()))) continue;
+          if (name === 'data-ge-data-chart' && (tag !== 'span' || value.length > 65536)) continue;
           if (name === 'data-ge-image-ref') {
             if (!safeMediaReference(value)) continue;
           }
