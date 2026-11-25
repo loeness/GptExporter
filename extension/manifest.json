@@ -20,11 +20,11 @@
     "run_at": "document_start"
   }, {
     "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
-    "js": ["src/platforms.js", "src/conversation.js", "src/history.js", "src/content.js"],
+    "js": ["src/platforms.js", "src/conversation.js", "src/history.js", "src/visual-capture.js", "src/content.js"],
     "run_at": "document_idle"
   }, {
     "matches": ["https://claude.ai/*", "https://chat.qwen.ai/*", "https://chat.deepseek.com/*", "https://kimi.ai/*", "https://www.kimi.ai/*", "https://kimi.com/*", "https://www.kimi.com/*", "https://kimi.moonshot.cn/*", "https://gemini.google.com/*", "https://www.doubao.com/*", "https://doubao.com/*", "https://grok.com/*"],
-    "js": ["src/platforms.js", "src/conversation.js", "src/content.js"],
+    "js": ["src/platforms.js", "src/conversation.js", "src/visual-capture.js", "src/content.js"],
     "run_at": "document_idle"
   }],
   "content_security_policy": {

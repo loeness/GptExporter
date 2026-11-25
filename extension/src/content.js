@@ -6,18 +6,61 @@
   const api = globalThis.GptExporter;
   let busy = false, closeTimer = 0;
 
+  function appendVisualCaptures(conversation) {
+    const frames = api.visualCapture?.getFrames() || [];
+    if (!frames.length) return;
+    const title = '采集的图表与演示';
+    const id = 'visual-capture-section-' + frames[0].id;
+    const entries = frames.map((frame, index) => ({
+      frame,
+      label: `画面 ${index + 1}`,
+      target: `gpt-exporter-asset:${frame.id}`
+    }));
+    const message = {
+      id, role: 'assistant',
+      text: [title, ...entries.map(entry => entry.label)].join('\n'),
+      markdown: [`### ${title}`, ...entries.map(({label, target}) => `![${label}](${target})`)].join('\n\n'),
+      html: `<h3>${title}</h3>` + entries.map(({label, target}) => `<p><img src="${target}" alt="${label}"></p>`).join(''),
+      assetIds: frames.map(frame => frame.id)
+    };
+    const current = conversation.branches?.find(branch => branch.id === conversation.activeBranchId);
+    if (current) current.messageIds.push(id);
+    conversation.messages.push(message);
+    conversation.assets = [
+      ...entries.map(({frame, label}) => ({
+        id: frame.id, size: frame.size, messageId: id, kind: 'image',
+        name: label + '.png', mimeType: 'image/png', visualCapture: true
+      })),
+      ...(conversation.assets || [])
+    ];
+  }
+
   async function collect() {
     const url = location.href;
     const platform = api.getPlatform(url);
     if (!platform) throw new Error('当前网站暂不支持对话导出。');
     const conversation = platform.id === 'chatgpt' ? await api.collectConversation({document, url}) : api.collectPlatformConversation({document, url});
     if (url !== location.href) throw new Error('对话已切换，请在当前对话重新导出。');
+    if (conversation) appendVisualCaptures(conversation);
     if (!conversation?.messages.length) throw new Error(`未识别到 ${platform.label} 对话消息，请打开具体对话并等待加载；页面结构变化时可能需要更新适配。`);
     return conversation;
   }
 
   chrome.runtime.onMessage.addListener((message, sender, respond) => {
     if (sender.id !== chrome.runtime.id) return false;
+    if (message?.type === 'GPT_EXPORTER_START_VISUAL_CAPTURE') {
+      if (sender.url !== chrome.runtime.getURL('popup.html') || !api.getPlatform(location.href) || !api.visualCapture) {
+        respond({ok:false}); return false;
+      }
+      respond(api.visualCapture.start({launcher:host}));
+      return false;
+    }
+    if (message?.type === 'GPT_EXPORTER_GET_VISUAL_CAPTURE') {
+      if (sender.tab || sender.url !== chrome.runtime.getURL('src/background.js')) return false;
+      const asset = api.visualCapture?.getFrame(message.assetId, message.url);
+      respond(asset ? {ok:true,asset} : {ok:false,error:'采集画面已清除，或原对话页面已关闭、刷新或切换。'});
+      return false;
+    }
     if (message?.type === 'GPT_EXPORTER_PROGRESS') {
       if (busy && typeof message.text === 'string') status.textContent = message.text.slice(0,100);
       respond({ok:true}); return false;

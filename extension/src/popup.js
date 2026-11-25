@@ -178,6 +178,30 @@ for (const input of document.querySelectorAll('[data-role]')) {
   });
 }
 
+document.getElementById('start-visual-capture')?.addEventListener('click', async event => {
+  const button = event.currentTarget;
+  const status = document.getElementById('visual-capture-status');
+  status.textContent = '';
+  button.disabled = true;
+  try {
+    const [tab] = await chrome.tabs.query({active: true, currentWindow: true});
+    if (tab?.id == null) {
+      status.textContent = '请先打开受支持的对话。';
+      return;
+    }
+    const result = await chrome.tabs.sendMessage(tab.id, {type: 'GPT_EXPORTER_START_VISUAL_CAPTURE'}, {frameId: 0});
+    if (result?.ok === true) {
+      window.close();
+      return;
+    }
+    status.textContent = '无法开始采集。请确认已打开受支持的对话，然后刷新页面重试。';
+  } catch (_) {
+    status.textContent = '请先打开受支持的对话。如果已打开，请刷新页面后重试。';
+  } finally {
+    button.disabled = false;
+  }
+});
+
 document.getElementById('open-download-settings')?.addEventListener('click', async event => {
   const button = event.currentTarget;
   button.disabled = true;

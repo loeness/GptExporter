@@ -6,6 +6,11 @@
   <p class="supported-platforms">支持 ChatGPT、Claude、Qwen、DeepSeek、Kimi、Gemini、豆包和 Grok。</p>
   <details class="settings" open>
     <summary>导出设置</summary>
+    <div class="capture-action">
+      <p id="visual-capture-hint">先打开受支持的对话，再采集页面上可见的图表和演示。</p>
+      <button id="start-visual-capture" class="secondary-button" type="button" aria-describedby="visual-capture-hint">采集图表和演示</button>
+    </div>
+    <p id="visual-capture-status" class="settings-status" data-kind="error" role="status" aria-live="polite"></p>
     <div class="settings-list">
       <label class="setting-row"><input id="setting-show-toolbar" data-setting="showToolbarButton" type="checkbox"><span>显示对话页导出按钮</span></label>
       <label class="setting-row"><input id="setting-close-reader" data-setting="closeSelectionAfterExport" type="checkbox"><span>导出后关闭选择窗口</span></label>

@@ -9,6 +9,17 @@ const MAX_ASSETS = 300;
 const assetLookups = new Map();
 const MAX_IMAGE_EDGE = 1800;
 const IMAGE_TARGET_BYTES = 900 * 1024;
+const VISUAL_CAPTURE_ID = /^visual-capture-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+const PNG_DATA_PREFIX = 'data:image/png;base64,';
+const CAPTURE_MAX_FRAMES = 24;
+const CAPTURE_MAX_BYTES = 8 * 1024 * 1024;
+const CAPTURE_MAX_TOTAL_BYTES = 24 * 1024 * 1024;
+const CAPTURE_MAX_EDGE = 2400;
+const CAPTURE_MAX_PIXELS = 4000000;
+const CAPTURE_INTERVAL_MS = 550;
+const CAPTURE_SOURCE_ERROR = '请保持原对话标签页在前台，并在同一页面重新截图。';
+let lastCapture = -Infinity;
+let capturePending = false;
 let openQueue = Promise.resolve();
 let activeDirectId = '';
 let directAssetLookup;
@@ -74,14 +85,37 @@ function validateConversation(input) {
     conversationId: chatgpt ? String(input.source?.conversationId || '').slice(0, 250) : ''
   };
   if (!chatgpt) model.warnings = [`${platform.label}：仅包含当前页面已加载的消息，未读取完整历史和其他分支。`,...model.warnings].slice(0,10);
-  const assets = chatgpt && Array.isArray(input.assets) ? input.assets : [];
-  if (assets.length > MAX_ASSETS) model.warnings.unshift(`对话中的媒体超过 ${MAX_ASSETS} 个，超出部分未读取。`);
-  model.assets = assets.slice(0, MAX_ASSETS).filter(asset => asset && ['image','attachment'].includes(asset.kind)).map(asset => ({
+  const assets = Array.isArray(input.assets) ? input.assets : [];
+  const visualAssets = new Map();
+  let captureBytes = 0;
+  for (const asset of assets) {
+    if (asset?.visualCapture !== true || typeof asset.id !== 'string' || !VISUAL_CAPTURE_ID.test(asset.id) ||
+        !messageIds.has(asset.messageId) || asset.kind !== 'image' || asset.mimeType !== 'image/png' ||
+        !Number.isSafeInteger(asset.size) || asset.size <= 0 || asset.size > CAPTURE_MAX_BYTES || visualAssets.has(asset.id)) continue;
+    captureBytes += asset.size;
+    if (visualAssets.size >= CAPTURE_MAX_FRAMES || captureBytes > CAPTURE_MAX_TOTAL_BYTES) throw new Error('截图数量或大小超过导出上限。');
+    const name = (typeof asset.name === 'string' ? asset.name.slice(0, 250) : '').replace(/[\\/:*?"<>|\u0000-\u001f\u007f]/g, '-').trim();
+    visualAssets.set(asset.id, {id:asset.id,messageId:asset.messageId,kind:'image',name:name || '可视化截图.png',
+      mimeType:'image/png',size:asset.size,visualCapture:true,status:'pending'});
+  }
+  const ordinaryAssets = chatgpt ? assets.filter(asset => asset && asset.visualCapture !== true &&
+    !VISUAL_CAPTURE_ID.test(asset.id) && ['image','attachment'].includes(asset.kind)) : [];
+  const remainingAssets = MAX_ASSETS - visualAssets.size;
+  if (ordinaryAssets.length > remainingAssets) model.warnings.unshift(`对话中的媒体超过 ${MAX_ASSETS} 个，超出部分未读取。`);
+  model.assets = [...visualAssets.values(), ...ordinaryAssets.slice(0, remainingAssets).map(asset => ({
     id: String(asset.id || '').slice(0, 250), messageId: String(asset.messageId || '').slice(0, 250), kind:asset.kind,
     name:String(asset.name || '附件').slice(0, 250),mimeType:String(asset.mimeType || 'application/octet-stream').slice(0, 100),
     size:Number.isFinite(asset.size) ? asset.size : undefined,fileId:String(asset.fileId || '').slice(0, 250),
     url:typeof asset.url === 'string' && approvedMediaUrl(asset.url) ? asset.url : '',status:'pending'
-  }));
+  }))];
+  const capturesByMessage = new Map();
+  for (const asset of visualAssets.values()) {
+    if (!capturesByMessage.has(asset.messageId)) capturesByMessage.set(asset.messageId, []);
+    capturesByMessage.get(asset.messageId).push(asset.id);
+  }
+  for (const message of model.messages) {
+    message.assetIds = [...(capturesByMessage.get(message.id) || []), ...message.assetIds.filter(id => !VISUAL_CAPTURE_ID.test(id))];
+  }
   return model;
 }
 
@@ -97,6 +131,10 @@ function modelFromSender(input, sender) {
   if (!fromPopup && new URL(sender.url).origin !== new URL(model.url).origin) throw new Error('对话来源与当前平台不一致，请刷新原页面后重试。');
   model.source.sourceTabId = !fromPopup && Number.isInteger(sender?.tab?.id) ? sender.tab.id :
     (Number.isInteger(input.source?.sourceTabId) ? input.source.sourceTabId : undefined);
+  if (model.assets.some(asset => asset.visualCapture) && !fromPopup &&
+      (sender.frameId !== 0 || sender.url !== model.url || !Number.isInteger(sender.tab?.id))) {
+    throw new Error(CAPTURE_SOURCE_ERROR);
+  }
   return model;
 }
 
@@ -261,6 +299,142 @@ async function loadAsset(message, fromOffscreen) {
   return withAssetRecord(message.exportId, fromOffscreen, model => readAsset(model, message.assetId));
 }
 
+function decodePngDataUrl(dataUrl, maxBytes) {
+  if (typeof dataUrl !== 'string' || !dataUrl.startsWith(PNG_DATA_PREFIX) ||
+      dataUrl.length > PNG_DATA_PREFIX.length + Math.ceil(maxBytes / 3) * 4) throw new Error('截图 PNG 无效或超过大小上限。');
+  const encoded = dataUrl.slice(PNG_DATA_PREFIX.length);
+  let bytes;
+  if (typeof Uint8Array.fromBase64 === 'function') {
+    bytes = Uint8Array.fromBase64(encoded, {lastChunkHandling:'strict'});
+  } else {
+    const raw = atob(encoded);
+    bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  }
+  if (bytes.length < 33 || bytes.length > maxBytes ||
+      String.fromCharCode(...bytes.subarray(0, 16)) !== '\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR') {
+    throw new Error('截图 PNG 无效或超过大小上限。');
+  }
+  const header = new DataView(bytes.buffer);
+  return {bytes,width:header.getUint32(16),height:header.getUint32(20)};
+}
+
+function encodeBase64(bytes) {
+  if (typeof bytes.toBase64 === 'function') return bytes.toBase64();
+  let binary = '';
+  for (let offset = 0; offset < bytes.length; offset += 32768) binary += String.fromCharCode(...bytes.subarray(offset, offset + 32768));
+  return btoa(binary);
+}
+
+function validCaptureDimensions(width, height) {
+  return width > 0 && height > 0 && Math.max(width, height) <= CAPTURE_MAX_EDGE && width * height <= CAPTURE_MAX_PIXELS;
+}
+
+async function cropCapture(dataUrl, region) {
+  const {bytes,width,height} = decodePngDataUrl(dataUrl, 72 * 1024 * 1024);
+  const scaleX = width / region.viewportWidth;
+  const scaleY = height / region.viewportHeight;
+  // Browser zoom and DPR are reflected by the bitmap. Allow only raster rounding between axes.
+  const axisTolerance = 1 / region.viewportWidth + 1 / region.viewportHeight;
+  if (Math.min(scaleX, scaleY) < 0.1 || Math.max(scaleX, scaleY) > 16 || width * height > 34000000 ||
+      Math.max(width, height) > 16384 || Math.abs(scaleX - scaleY) > axisTolerance ||
+      (Number.isFinite(region.devicePixelRatio) && (Math.abs(scaleX - region.devicePixelRatio) > axisTolerance ||
+        Math.abs(scaleY - region.devicePixelRatio) > axisTolerance))) {
+    throw new Error('浏览器截图与所选视口的尺寸不一致，请重新选区。');
+  }
+  const left = Math.ceil(region.x * scaleX);
+  const top = Math.ceil(region.y * scaleY);
+  const right = Math.floor((region.x + region.width) * scaleX);
+  const bottom = Math.floor((region.y + region.height) * scaleY);
+  const cropWidth = right - left;
+  const cropHeight = bottom - top;
+  if (!validCaptureDimensions(cropWidth, cropHeight)) throw new Error('选区必须包含至少一个完整像素，且不超过 400 万像素、单边 2,400 像素。请调整选区或浏览器缩放。');
+  const bitmap = await createImageBitmap(new Blob([bytes], {type:'image/png'}));
+  let canvas;
+  try {
+    if (bitmap.width !== width || bitmap.height !== height) throw new Error('无法确认浏览器截图的像素尺寸。');
+    canvas = new OffscreenCanvas(cropWidth, cropHeight);
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('浏览器无法裁剪截图。');
+    context.drawImage(bitmap, left, top, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
+    const output = await canvas.convertToBlob({type:'image/png'});
+    if (output.type !== 'image/png' || !output.size || output.size > CAPTURE_MAX_BYTES) throw new Error('单张截图超过 8 MiB，请缩小选区。');
+    const dataUrl = PNG_DATA_PREFIX + encodeBase64(new Uint8Array(await output.arrayBuffer()));
+    return {ok:true,dataUrl,size:output.size};
+  } finally {
+    bitmap.close();
+    if (canvas) canvas.width = canvas.height = 1;
+  }
+}
+
+async function captureRegion(message, sender) {
+  const {url,region} = message;
+  const tabId = sender.tab?.id;
+  const windowId = sender.tab?.windowId;
+  if (sender.id !== chrome.runtime.id || sender.frameId !== 0 ||
+      (sender.documentLifecycle && sender.documentLifecycle !== 'active') || !supportedPage(url) || sender.url !== url ||
+      !Number.isInteger(tabId) || tabId < 0 || !Number.isInteger(windowId) || windowId < 0) throw new Error(CAPTURE_SOURCE_ERROR);
+  if (!region || ![region.x,region.y,region.width,region.height,region.viewportWidth,region.viewportHeight].every(Number.isFinite) ||
+      (region.devicePixelRatio !== undefined && (!Number.isFinite(region.devicePixelRatio) || region.devicePixelRatio <= 0)) ||
+      region.x < 0 || region.y < 0 || region.width <= 0 || region.height <= 0 ||
+      region.viewportWidth > 16384 || region.viewportHeight > 16384 ||
+      region.x + region.width > region.viewportWidth || region.y + region.height > region.viewportHeight) {
+    throw new Error('截图选区必须在当前可见页面内。');
+  }
+  if (capturePending || Date.now() - lastCapture < CAPTURE_INTERVAL_MS) throw new Error('截图请求过于频繁，请稍后重试。');
+
+  capturePending = true;
+  let changed = false;
+  const onActivated = info => { if (info.windowId === windowId && info.tabId !== tabId) changed = true; };
+  const onUpdated = (id, change) => { if (id === tabId && (change.url || change.status === 'loading')) changed = true; };
+  const onFocusChanged = id => { if (id !== windowId) changed = true; };
+  const events = [[chrome.tabs.onActivated,onActivated], [chrome.tabs.onUpdated,onUpdated], [chrome.windows.onFocusChanged,onFocusChanged]];
+  async function requireCurrentTab() {
+    const [tab,window] = await Promise.all([chrome.tabs.get(tabId),chrome.windows.get(windowId)]);
+    if (changed || !window.focused || tab.windowId !== windowId || !tab.active || tab.url !== url || tab.pendingUrl) {
+      throw new Error(CAPTURE_SOURCE_ERROR);
+    }
+  }
+  try {
+    for (const [event,listener] of events) event.addListener(listener);
+    await requireCurrentTab();
+    lastCapture = Date.now();
+    let screenshot;
+    try {
+      screenshot = await chrome.tabs.captureVisibleTab(windowId, {format:'png'});
+    } catch {
+      throw new Error('浏览器无法截图。请从工具栏重新打开扩展，在当前对话中再试一次。');
+    }
+    await requireCurrentTab();
+    const result = await cropCapture(screenshot, region);
+    if (changed) throw new Error(CAPTURE_SOURCE_ERROR);
+    return result;
+  } finally {
+    for (const [event,listener] of events) event.removeListener(listener);
+    capturePending = false;
+  }
+}
+
+async function readVisualCapture(model, asset) {
+  const tabId = model.source.sourceTabId;
+  if (!Number.isInteger(tabId)) throw new Error('请保持截图所在的原对话标签页打开。');
+  let response;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (tab.url !== model.url || tab.pendingUrl) throw new Error(CAPTURE_SOURCE_ERROR);
+    response = await withTimeout(chrome.tabs.sendMessage(tabId, {
+      type:'GPT_EXPORTER_GET_VISUAL_CAPTURE',assetId:asset.id,url:model.url
+    }, {frameId:0}), 10000, '原对话未及时返回截图。');
+  } catch {
+    throw new Error('截图不可用，请保持截图所在的原对话标签页打开。');
+  }
+  if (!response?.ok || response.asset?.mimeType !== 'image/png') throw new Error('截图不可用，请返回原对话重新截图。');
+  const {dataUrl,size} = response.asset;
+  const {bytes,width,height} = decodePngDataUrl(dataUrl, CAPTURE_MAX_BYTES);
+  if (bytes.length !== size || size !== asset.size || !validCaptureDimensions(width, height)) throw new Error('截图数据大小或像素尺寸不符。');
+  return {ok:true,asset:{dataUrl,mimeType:'image/png',size,name:asset.name,status:'ready'}};
+}
+
 async function compactImage(bytes, mimeType) {
   const original = { bytes, mimeType };
   if (typeof createImageBitmap !== 'function' || typeof OffscreenCanvas !== 'function') return original;
@@ -321,6 +495,7 @@ async function compactImage(bytes, mimeType) {
 async function readAsset(model, assetId) {
   const asset = model?.assets.get(assetId);
   if (!asset) throw new Error('附件不在本次对话中。');
+  if (asset.visualCapture === true) return readVisualCapture(model, asset);
   let resolved = asset;
   if ((asset.fileId || !asset.url) && Number.isInteger(model.source?.sourceTabId)) {
     try {
@@ -372,17 +547,15 @@ async function readAsset(model, assetId) {
   if (!/^[\w.+-]+\/[\w.+-]+$/.test(mimeType)) mimeType='application/octet-stream';
   // Preserve active formats only as download-only bytes; never make an HTML/SVG document in the reader.
   if(asset.kind==='attachment'&&/(?:html|svg|javascript|ecmascript|xml)/i.test(mimeType))mimeType='application/octet-stream';
-  let encoded;
-  if (typeof bytes.toBase64 === 'function') encoded = bytes.toBase64();
-  else {
-    let binary = '';
-    for (let offset = 0; offset < bytes.length; offset += 32768) binary += String.fromCharCode(...bytes.subarray(offset, offset + 32768));
-    encoded = btoa(binary);
-  }
+  const encoded = encodeBase64(bytes);
   return {ok:true,asset:{dataUrl:`data:${mimeType};base64,${encoded}`,mimeType,size:bytes.length,name:String(resolved.name||asset.name),status:'ready'}};
 }
 
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
+  if (message?.type === 'GPT_EXPORTER_CAPTURE_REGION') {
+    captureRegion(message, sender).then(respond, error => respond({ok:false,error:error.message || '截图失败，请重试。'}));
+    return true;
+  }
   if (message?.type === 'GPT_EXPORTER_DIRECT_PROGRESS') {
     if (sender.id !== chrome.runtime.id || sender.tab || sender.url !== chrome.runtime.getURL('direct-export.html') ||
         !activeDirectId || message.exportId !== activeDirectId) { respond({ok:false}); return false; }
