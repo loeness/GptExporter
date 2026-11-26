@@ -8,7 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { chromium } = require('playwright');
 
-const extension = path.resolve(__dirname, '../extension');
+const extension = path.resolve(process.env.GPT_EXPORTER_TEST_EXTENSION || path.join(__dirname, '../extension'));
 const output = path.resolve(__dirname, '../test-results/large-export-' + Date.now());
 const bundledChromium = path.resolve(__dirname, '../../browsers/chromium-1194/chrome-win/chrome.exe');
 const configuredChromium = process.env.GPT_EXPORTER_CHROMIUM_EXECUTABLE || (fs.existsSync(bundledChromium) ? bundledChromium : undefined);
@@ -249,7 +249,9 @@ async function run() {
     const readerPdfStarted = performance.now();
     await reader.locator('[data-format="pdf"]').click();
     await reader.locator('#pdf-preview-dialog').waitFor({ state: 'visible', timeout });
-    await reader.waitForFunction(() => document.querySelector('#pdf-preview-frame')?.src.startsWith('blob:'), null, { timeout });
+    await reader.waitForFunction(() => document.querySelector('#pdf-preview-frame')?.src.startsWith('blob:') &&
+      !document.getElementById('pdf-preview-download')?.disabled, null, { timeout });
+    const readerPdfReadyMs = Math.round(performance.now() - readerPdfStarted);
     const readerDownloadPromise = reader.waitForEvent('download', { timeout });
     await reader.locator('#pdf-preview-download').click();
     await (await readerDownloadPromise).saveAs(readerPath);
@@ -293,7 +295,7 @@ async function run() {
     assert.deepEqual(errors, []);
     assert.deepEqual(unexpectedRequests, []);
     const report = { browser: context.browser().version(), messageCount, imageCount, highResolutionCount, fixtureBytes,
-      readerPreviewMs, readerPdf: { milliseconds: readerPdfMs, ...readerPdf }, quickPdf: { milliseconds: quickPdfMs, ...quickPdf } };
+      readerPreviewMs, readerPdfReadyMs, readerPdf: { milliseconds: readerPdfMs, ...readerPdf }, quickPdf: { milliseconds: quickPdfMs, ...quickPdf } };
     fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify(report, null, 2));
     console.log(JSON.stringify({ ...report, output }, null, 2));
   } finally {

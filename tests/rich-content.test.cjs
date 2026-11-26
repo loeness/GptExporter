@@ -117,6 +117,57 @@ test('enhances only READY assets, blocks Mermaid configuration and resource synt
   assert.ok(mermaidConfigs[0].secure.includes('securityLevel'));
 });
 
+test('reuses sanitized formulas within each pass and creates independent DOM for repeated TeX', async () => {
+  const api = global.GptExporter;
+  const conversation = { messages: [{ id: 'repeated-math', role: 'assistant', markdown: '$x$ and $x$\n\n$$x$$' }] };
+  const container = document.createElement('div');
+  const html = api.renderHtmlFragment(conversation);
+  const start = katexOptions.length;
+  for (let pass = 0; pass < 2; pass += 1) {
+    container.innerHTML = html;
+    await api.enhanceRichContent(container, conversation);
+    const [first, second, display] = container.querySelectorAll('[data-ge-rendered="true"]');
+    assert.equal(first.innerHTML, second.innerHTML);
+    assert.notEqual(first.firstElementChild, second.firstElementChild);
+    assert.notEqual(first.innerHTML, display.innerHTML);
+  }
+  assert.deepEqual(katexOptions.slice(start).map(({ tex, options }) => [tex, options.displayMode]),
+    [['x', false], ['x', true], ['x', false], ['x', true]]);
+});
+
+test('loads rich vendors only when matching content needs them and keeps fallbacks on failure', async () => {
+  const api = global.GptExporter;
+  const vendors = global.GptExporterVendors;
+  const originalLoader = api.loadVendor;
+  const originalMermaid = vendors.mermaid;
+  const calls = [];
+  const container = document.createElement('div');
+  delete vendors.mermaid;
+  api.loadVendor = async name => {
+    calls.push(name);
+    throw new Error('missing bundle');
+  };
+  try {
+    container.innerHTML = '<p>Plain content</p><pre data-ge-mermaid="true">click A fn</pre>';
+    await api.enhanceRichContent(container, {});
+    await api.snapshotRichContent(container);
+    assert.deepEqual(calls, []);
+
+    container.innerHTML = '<pre data-ge-mermaid="true">graph LR; A--&gt;B</pre>'.repeat(2) +
+      '<span data-ge-math="true" data-ge-tex="x">x</span>';
+    await api.enhanceRichContent(container, {});
+    assert.deepEqual(calls, ['mermaid']);
+    assert.equal(container.querySelectorAll('pre[data-ge-mermaid] + [data-ge-mermaid-error]').length, 2);
+    const snapshot = await api.snapshotRichContent(container);
+    assert.deepEqual(calls, ['mermaid', 'math']);
+    assert.ok(snapshot.querySelector('img[alt="TeX: x"]'));
+  } finally {
+    vendors.mermaid = originalMermaid;
+    if (originalLoader) api.loadVendor = originalLoader;
+    else delete api.loadVendor;
+  }
+});
+
 test('snapshots embed READY raster media and safe downloads without SVG or remote references', async () => {
   const conversation = {
     schemaVersion: 2,

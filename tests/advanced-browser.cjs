@@ -198,7 +198,8 @@ function isPdfFile(file){
     await reader.waitForSelector('#preview-content a[download="notes.txt"]');
     checks.push('signed raster media via approved background transport','attachment original bytes in memory');
     await reader.screenshot({path:path.join(output,'rich-reader.png'),fullPage:false});
-    await reader.evaluate(()=>{
+    await reader.evaluate(async()=>{
+      if (!GptExporterVendors.renderMathSvg) await GptExporter.loadVendor('math');
       const vector=GptExporterVendors.renderMathSvg;window.__vectorMathCalls=0;window.__htmlMathCalls=0;
       GptExporterVendors.renderMathSvg=(...args)=>{window.__vectorMathCalls++;return vector(...args);};
       const original=GptExporterVendors.html2canvas;
@@ -264,6 +265,11 @@ function isPdfFile(file){
       return {file,url,content:readPdfContent(file)};
     };
     const initialPdf=await downloadPreview('rich.pdf');
+    const fontControl=reader.locator('#pdf-font-size');
+    await fontControl.dispatchEvent('input');
+    await fontControl.dispatchEvent('change');
+    assert.equal(await reader.locator('#pdf-preview-download').isEnabled(),true,'an identical layout keeps the existing PDF ready');
+    assert.equal(await reader.locator('#pdf-preview-frame').getAttribute('src'),initialPdf.url);
     const pdfPath=initialPdf.file;
     const nativeFrame=await reader.locator('#pdf-preview-frame').elementHandle();
     const pdfFrame=await nativeFrame.contentFrame();

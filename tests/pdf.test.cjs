@@ -409,6 +409,40 @@ test('generates bytes with pdfmake getBuffer after registering the local CJK fon
   assert.deepEqual(calls.definition.pageMargins, [32, 32, 32, 32]);
 });
 
+test('prepares a lazy PDF engine and registers font bytes only once', async (context) => {
+  const vendors = global.GptExporterVendors;
+  const previousVendor = vendors.pdfMake;
+  delete vendors.pdfMake;
+  context.after(() => { vendors.pdfMake = previousVendor; });
+
+  const fontBytes = new Uint8Array([1, 2, 3]);
+  const fetch = context.mock.method(global, 'fetch', async () => ({
+    ok: true, async arrayBuffer() { return fontBytes.buffer; }
+  }));
+  let font;
+  const pdfMake = {
+    addVirtualFileSystem(vfs) { font = vfs['NotoSansCJKsc-Regular.otf']; },
+    createPdf() {
+      assert.deepEqual(font, { data: fontBytes, encoding: 'base64' });
+      return { getBuffer: async () => new Uint8Array([37, 80, 68, 70]) };
+    }
+  };
+  context.after(() => { delete api.loadVendor; });
+  api.loadVendor = async (name) => {
+    assert.equal(name, 'pdf');
+    vendors.pdfMake = pdfMake;
+  };
+  const loadVendor = context.mock.method(api, 'loadVendor');
+
+  const [, output] = await Promise.all([api.preparePdf(), api.buildPdf({
+    container: makeContainer('<article data-message-id="selected"><p>可搜索文本</p></article>'),
+    messages: [selectedMessage]
+  })]);
+  assert.deepEqual(output, new Uint8Array([37, 80, 68, 70]));
+  assert.equal(loadVendor.mock.callCount(), 1);
+  assert.equal(fetch.mock.callCount(), 1);
+});
+
 test('bounds PDF raster conversions, shares repeated images, and substitutes unreadable images', async (context) => {
   const compactPng = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X9YQAAAAASUVORK5CYII=';
   const largeHeader = Buffer.from(png.split(',')[1], 'base64');

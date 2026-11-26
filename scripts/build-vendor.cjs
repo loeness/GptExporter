@@ -5,6 +5,12 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const repo = path.resolve(__dirname, '..');
 const out = path.join(repo, 'extension/vendor');
+const bundles = [
+  ['vendor-pdf-entry.mjs', 'pdf-engine.js'],
+  ['vendor-mermaid-entry.mjs', 'mermaid.js'],
+  ['vendor-entry.mjs', 'libraries.js'],
+  ['vendor-math-entry.mjs', 'pdf-formulas.js']
+];
 const dependencies = ['pdfmake', 'mermaid', 'katex', 'markdown-it', 'dompurify', 'html2canvas','mathjax-full','acorn'];
 function packageRoot(name) {
   let current = path.dirname(require.resolve(name));
@@ -14,11 +20,27 @@ function packageRoot(name) {
     const parent = path.dirname(current); if (parent === current) throw new Error('Package root unavailable: ' + name); current = parent;
   }
 }
+function writeNotice(filename, contents) {
+  const normalize = text => text.replace(/\r\n/g, '\n');
+  if (!fs.existsSync(filename) || normalize(fs.readFileSync(filename, 'utf8')) !== normalize(contents)) {
+    fs.writeFileSync(filename, contents);
+  }
+}
 (async () => {
   fs.mkdirSync(path.join(out, 'licenses'), {recursive: true});
   fs.mkdirSync(path.join(out, 'fonts'), {recursive: true});
-  const build=await esbuild.build({entryPoints:[path.join(__dirname,'vendor-entry.mjs')], outfile:path.join(out,'libraries.js'),
-    bundle:true, platform:'browser', format:'iife', target:['chrome114'], minify:true, legalComments:'linked',metafile:true});
+  const builds = await Promise.all(bundles.map(([entry, filename]) => esbuild.build({
+    absWorkingDir: repo,
+    entryPoints: [path.join(__dirname, entry)],
+    outfile: path.join(out, filename),
+    bundle: true,
+    platform: 'browser',
+    format: 'iife',
+    target: ['chrome114'],
+    minify: true,
+    legalComments: 'linked',
+    metafile: true
+  })));
   const katexRoot = packageRoot('katex');
   fs.copyFileSync(path.join(packageRoot('acorn'),'dist/acorn.js'), path.join(out,'acorn.js'));
   fs.copyFileSync(path.join(katexRoot,'dist/katex.min.css'), path.join(out,'katex.min.css'));
@@ -28,11 +50,12 @@ function packageRoot(name) {
   const packages = dependencies.map(name => {
     const directory = packageRoot(name), pkg = JSON.parse(fs.readFileSync(path.join(directory,'package.json')));
     const license = ['LICENSE','LICENSE.md','LICENSE.txt','LICENSE-MIT','license','LICENSE-MIT.txt'].find(file=>fs.existsSync(path.join(directory,file)));
-    if (license) fs.copyFileSync(path.join(directory,license),path.join(out,'licenses',name+'.txt'));
+    if (license) writeNotice(path.join(out,'licenses',name+'.txt'),fs.readFileSync(path.join(directory,license),'utf8'));
     return {name,version:pkg.version,license:pkg.license,source:typeof pkg.repository==='object'?pkg.repository.url:pkg.repository};
   });
   const bundledPackages=new Map();
-  for(const input of Object.keys(build.metafile.inputs)){
+  const inputs = new Set(builds.flatMap(build => Object.keys(build.metafile.inputs)));
+  for(const input of inputs){
     if(!input.includes('node_modules'))continue;
     let directory=path.dirname(path.resolve(repo,input));
     while(directory.startsWith(repo+path.sep)){
@@ -52,10 +75,12 @@ function packageRoot(name) {
       directory=path.dirname(directory);
     }
   }
-  const notices=[...bundledPackages.values()].sort((a,b)=>a.name.localeCompare(b.name));
-  fs.writeFileSync(path.join(out,'licenses','BUNDLED-NOTICES.txt'),notices.map(pkg=>`${pkg.name}@${pkg.version}\nLicense: ${pkg.license}\n\n${pkg.notice}`).join('\n\n========================================\n\n'));
+  const notices=[...bundledPackages.values()].sort((a,b)=>a.name.localeCompare(b.name, 'en'));
+  writeNotice(path.join(out,'licenses','BUNDLED-NOTICES.txt'),notices.map(pkg=>`${pkg.name}@${pkg.version}\nLicense: ${pkg.license}\n\n${pkg.notice}`).join('\n\n========================================\n\n'));
   const hash = file => crypto.createHash('sha256').update(fs.readFileSync(path.join(out,file))).digest('hex');
-  fs.writeFileSync(path.join(out,'provenance.json'),JSON.stringify({packages,bundledPackages:notices.map(({notice,...pkg})=>pkg),bundleSha256:hash('libraries.js'),acornSha256:hash('acorn.js'),
+  const bundlesSha256 = Object.fromEntries(bundles.map(([, filename]) => [filename, hash(filename)]));
+  fs.writeFileSync(path.join(out,'provenance.json'),JSON.stringify({packages,bundledPackages:notices.map(({notice,...pkg})=>pkg),
+    bundleSha256:bundlesSha256['libraries.js'],bundlesSha256,acornSha256:hash('acorn.js'),
     font:{name:'NotoSansCJKsc-Regular.otf',source:'https://github.com/notofonts/noto-cjk/blob/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf',license:'OFL-1.1',sha256:hash('fonts/NotoSansCJKsc-Regular.otf')}},null,2)+'\n');
-  console.log('Local vendor bundle and font provenance updated.');
+  console.log('Local vendor bundles and font provenance updated.');
 })();

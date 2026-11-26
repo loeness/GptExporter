@@ -8,6 +8,7 @@
     'application/javascript', 'text/javascript', 'application/ecmascript', 'text/ecmascript'
   ]);
   let idCounter = 0;
+  const markdownRenderers = new WeakMap();
   const initializedMermaid = new WeakSet();
   const imageReferences = new WeakMap();
   const attachmentSections = new WeakMap();
@@ -99,6 +100,8 @@
   function makeMarkdownRenderer() {
     const MarkdownIt = markdownCtor();
     if (!MarkdownIt) return null;
+    const cached = markdownRenderers.get(MarkdownIt);
+    if (cached) return cached;
     const md = new MarkdownIt({
       html: false,
       linkify: false,
@@ -126,6 +129,7 @@
       }
       return defaultFenceRenderer(tokens, index, options, env, self);
     };
+    markdownRenderers.set(MarkdownIt, md);
     return md;
   }
 
@@ -239,12 +243,14 @@
   function placeholderReference(placeholder) {
     const attribute = placeholder.getAttribute('data-ge-image-ref');
     let path = '';
-    try {
-      const url = new URL(attribute);
-      // Markdown emits these already-validated references without signed queries.
-      if (url.protocol === 'https:' && allowedMediaHost(url.hostname) &&
-          attribute === `${url.origin}${url.pathname}`) path = attribute;
-    } catch (_) { /* A blocked or missing reference cannot match an asset. */ }
+    if (attribute) {
+      try {
+        const url = new URL(attribute);
+        // Markdown emits these already-validated references without signed queries.
+        if (url.protocol === 'https:' && allowedMediaHost(url.hostname) &&
+            attribute === `${url.origin}${url.pathname}`) path = attribute;
+      } catch (_) { /* A blocked reference cannot match an asset. */ }
+    }
     return {
       id: safeAssetId(placeholder.getAttribute('data-ge-asset-id')),
       path,
@@ -488,9 +494,22 @@
     return document.importNode(svgRoot, true);
   }
 
-  async function renderMermaid(target, mermaid, document) {
+  function mermaidLoader() {
+    let pending;
+    return () => pending ||= api.loadVendor?.('mermaid');
+  }
+
+  async function renderMermaid(target, document, loadMermaid) {
     const source = target.textContent || '';
-    if (rejectMermaidSource(source) || !mermaid || typeof mermaid.render !== 'function' || !initializeMermaid(mermaid)) return false;
+    if (rejectMermaidSource(source)) return false;
+    let mermaid = unwrapVendor('mermaid') || root.mermaid;
+    if (!mermaid) {
+      try {
+        await loadMermaid();
+      } catch (_) { return false; }
+      mermaid = unwrapVendor('mermaid') || root.mermaid;
+    }
+    if (!mermaid || typeof mermaid.render !== 'function' || !initializeMermaid(mermaid)) return false;
     try {
       const result = await mermaid.render(`gpt-exporter-diagram-${idCounter++}`, source);
       const rawSvg = typeof result === 'string' ? result : result && result.svg;
@@ -514,28 +533,40 @@
     api.restoreDataCharts?.(container);
     const katex = unwrapVendor('katex') || root.katex;
     const purifier = getPurifier();
+    const formulaCache = new Map();
+    let cachedCharacters = 0;
     for (const placeholder of Array.from(container.querySelectorAll('[data-ge-math="true"]'))) {
       const tex = placeholder.getAttribute('data-ge-tex') || placeholder.textContent || '';
       if (!katex || typeof katex.render !== 'function' || !purifier || tex.length > 20000) continue;
       try {
-        const scratch = document.createElement('span');
-        katex.render(tex, scratch, {
-          trust: false,
-          throwOnError: false,
-          strict: 'warn',
-          output: 'html',
-          maxExpand: 1000,
-          maxSize: 20,
-          displayMode: placeholder.getAttribute('data-ge-display') === 'true'
-        });
-        const safeHtml = purifier.sanitize(scratch.innerHTML, {
-          ALLOWED_TAGS: ['span', 'svg', 'path'],
-          ALLOWED_ATTR: ['class', 'style', 'aria-hidden', 'role', 'xmlns', 'width', 'height', 'viewBox', 'preserveAspectRatio', 'd'],
-          FORBID_ATTR: ['href', 'xlink:href', 'src', 'onload', 'onclick', 'onerror'],
-          ALLOW_DATA_ATTR: false,
-          RETURN_TRUSTED_TYPE: false
-        });
-        placeholder.innerHTML = String(safeHtml);
+        const displayMode = placeholder.getAttribute('data-ge-display') === 'true';
+        const key = (displayMode ? '1' : '0') + tex;
+        let safeHtml = formulaCache.get(key);
+        if (safeHtml === undefined) {
+          const scratch = document.createElement('span');
+          katex.render(tex, scratch, {
+            trust: false,
+            throwOnError: false,
+            strict: 'warn',
+            output: 'html',
+            maxExpand: 1000,
+            maxSize: 20,
+            displayMode
+          });
+          safeHtml = String(purifier.sanitize(scratch.innerHTML, {
+            ALLOWED_TAGS: ['span', 'svg', 'path'],
+            ALLOWED_ATTR: ['class', 'style', 'aria-hidden', 'role', 'xmlns', 'width', 'height', 'viewBox', 'preserveAspectRatio', 'd'],
+            FORBID_ATTR: ['href', 'xlink:href', 'src', 'onload', 'onclick', 'onerror'],
+            ALLOW_DATA_ATTR: false,
+            RETURN_TRUSTED_TYPE: false
+          }));
+          const entrySize = key.length + safeHtml.length;
+          if (formulaCache.size < 128 && cachedCharacters + entrySize <= 512 * 1024) {
+            formulaCache.set(key, safeHtml);
+            cachedCharacters += entrySize;
+          }
+        }
+        placeholder.innerHTML = safeHtml;
         placeholder.classList.add('ge-rendered-math');
         placeholder.setAttribute('data-ge-rendered', 'true');
       } catch (_) {
@@ -543,9 +574,9 @@
       }
     }
 
-    const mermaid = unwrapVendor('mermaid') || root.mermaid;
+    const loadMermaid = mermaidLoader();
     for (const source of Array.from(container.querySelectorAll('pre[data-ge-mermaid="true"]'))) {
-      const rendered = await renderMermaid(source, mermaid, document);
+      const rendered = await renderMermaid(source, document, loadMermaid);
       if (!rendered && !source.nextElementSibling?.matches('[data-ge-mermaid-error]')) {
         source.after(textElement(document, 'p', 'ge-mermaid-error', '图表无法安全渲染；保留 Mermaid 源码。'));
         source.nextElementSibling.setAttribute('data-ge-mermaid-error', 'true');
@@ -604,8 +635,7 @@
     return dataUrl ? { dataUrl, width: targetWidth, height: targetHeight } : null;
   }
 
-  async function mathCanvas(math, document) {
-    const { node, width, height } = math;
+  async function vectorMathSnapshot(math, document) {
     const vectorRenderer = vendors().renderMathSvg;
     if (typeof vectorRenderer === 'function') {
       try {
@@ -613,7 +643,11 @@
         if (snapshot) return snapshot;
       } catch (_) { /* Try the HTML renderer for formulas without embedded SVG. */ }
     }
+    return null;
+  }
 
+  async function htmlMathCanvas(math, document) {
+    const { node, width, height } = math;
     const canvasRenderer = unwrapVendor('html2canvas') || root.html2canvas;
     // The HTML renderer can silently omit embedded SVG glyphs such as radicals.
     if (typeof canvasRenderer !== 'function' || node.querySelector('svg') ||
@@ -988,7 +1022,7 @@
     return clone;
   }
 
-  async function rasterizePdfDiagram(job, document) {
+  async function rasterizePdfDiagram(job, document, loadMermaid) {
     if (!job.supported) return;
     let diagram;
     if (job.type === 'svg') {
@@ -998,7 +1032,7 @@
       const scratch = document.createElement('div');
       const source = textElement(document, 'pre', '', job.source);
       scratch.append(source);
-      if (!await renderMermaid(source, unwrapVendor('mermaid') || root.mermaid, document)) return;
+      if (!await renderMermaid(source, document, loadMermaid)) return;
       const svg = scratch.firstElementChild;
       svg.removeAttribute('data-ge-mermaid-source');
       const viewBox = svg.getAttribute('viewBox')?.trim().split(/[\s,]+/).map(Number);
@@ -1023,6 +1057,11 @@
     const host = document && document.body;
     const formulas = clone.querySelectorAll('[data-ge-math="true"][data-ge-rendered="true"]');
     const diagrams = clone.querySelectorAll('svg.ge-mermaid-diagram');
+    if (formulas.length && typeof vendors().renderMathSvg !== 'function') {
+      try {
+        await api.loadVendor?.('math');
+      } catch (_) { /* Keep the existing HTML or TeX fallback available. */ }
+    }
     const canAttach = Boolean(host && !clone.isConnected && (formulas.length || diagrams.length));
     if (canAttach) {
       clone.setAttribute('data-ge-snapshot-measuring', 'true');
@@ -1051,13 +1090,22 @@
           lastYield = Date.now();
         }
       }
-      // Keep the measuring tree intact while the HTML fallback may need it.
+      // Load a few independent SVGs together. Keep the measuring tree intact
+      // and run the HTML fallback one formula at a time.
       const mathSnapshots = [];
-      for (const math of measuredFormulas) {
-        const key = JSON.stringify([math.tex, math.display, math.fontSize, math.width, math.height]);
-        if (!cache.has(key)) cache.set(key, await mathCanvas(math, document));
-        mathSnapshots.push(cache.get(key));
-        await reportProgress();
+      const mathBatchSize = 4;
+      for (let index = 0; index < measuredFormulas.length; index += mathBatchSize) {
+        const pending = new Map();
+        const batch = measuredFormulas.slice(index, index + mathBatchSize).map(math => {
+          const key = JSON.stringify([math.tex, math.display, math.fontSize, math.width, math.height]);
+          if (!cache.has(key) && !pending.has(key)) pending.set(key, vectorMathSnapshot(math, document));
+          return { math, key };
+        });
+        for (const { math, key } of batch) {
+          if (!cache.has(key)) cache.set(key, await pending.get(key) || await htmlMathCanvas(math, document));
+          mathSnapshots.push(cache.get(key));
+          await reportProgress();
+        }
       }
       const diagramSnapshots = [];
       for (const { node, size } of measuredDiagrams) {
@@ -1085,8 +1133,9 @@
           node.replaceWith(fallback);
         }
       });
+      const loadMermaid = mermaidLoader();
       for (const job of pdfDiagrams || []) {
-        await rasterizePdfDiagram(job, document);
+        await rasterizePdfDiagram(job, document, loadMermaid);
         await reportProgress();
       }
       for (const element of Array.from(clone.querySelectorAll('[data-ge-image-placeholder], [data-ge-image-ref], [data-ge-asset-id], [data-ge-math], [data-ge-mermaid], [data-ge-mermaid-error], [data-ge-snapshot-measuring]'))) {

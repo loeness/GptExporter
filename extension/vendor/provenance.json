@@ -445,7 +445,13 @@
       "license": "MIT"
     }
   ],
-  "bundleSha256": "0a85f89cd688b4372f58fafc8e4489c327f4d9b95702c9ab83c973faa660979c",
+  "bundleSha256": "a0d083bff11d6737b9bdee535004ba409aa0515e6453ae2f2272c6f7ab9b5858",
+  "bundlesSha256": {
+    "pdf-engine.js": "be6909035afcdc294a77ebb43be896839ee5963c5ecdbb11411cb9a3916e37c5",
+    "mermaid.js": "ddf656e75e501582585c5b1652d9ff21398243f66b2effdcef44eb9b93c2abe7",
+    "libraries.js": "a0d083bff11d6737b9bdee535004ba409aa0515e6453ae2f2272c6f7ab9b5858",
+    "pdf-formulas.js": "ce84e04e1853ab8915cc4430cc13de7d1f64932f2d8e338704ea81b2397512ee"
+  },
   "acornSha256": "fdb08546776ec6228b03e8d02b40d4ab3255bae5f401adba7ff5dad927ac5c9c",
   "font": {
     "name": "NotoSansCJKsc-Regular.otf",

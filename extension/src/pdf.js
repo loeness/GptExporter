@@ -1154,11 +1154,16 @@
       }
       const bytes = new Uint8Array(await response.arrayBuffer());
       if (!bytes.length) throw new Error('本地 NotoSansCJK 字体文件为空，PDF 未生成。');
-      if (typeof root.btoa !== 'function') throw new Error('当前环境无法将本地 PDF 字体注册到虚拟文件系统。');
       const vfs = Object.assign({}, pdfMake.vfs || {});
-      vfs[FONT_FILE] = bytesToBase64(bytes);
-      if (typeof pdfMake.addVirtualFileSystem === 'function') pdfMake.addVirtualFileSystem(vfs);
-      else pdfMake.vfs = vfs;
+      if (typeof pdfMake.addVirtualFileSystem === 'function') {
+        // pdfmake passes the data to Buffer, which copies typed arrays without decoding them.
+        vfs[FONT_FILE] = { data: bytes, encoding: 'base64' };
+        pdfMake.addVirtualFileSystem(vfs);
+      } else {
+        if (typeof root.btoa !== 'function') throw new Error('当前环境无法将本地 PDF 字体注册到虚拟文件系统。');
+        vfs[FONT_FILE] = bytesToBase64(bytes);
+        pdfMake.vfs = vfs;
+      }
       const fonts = {
         [FONT_FAMILY]: { normal: FONT_FILE, bold: FONT_FILE, italics: FONT_FILE, bolditalics: FONT_FILE }
       };
@@ -1170,10 +1175,22 @@
     catch (error) { fontRegistration.delete(pdfMake); throw error; }
   }
 
-  async function buildPdf(options) {
-    const vendors = root.GptExporterVendors;
-    const pdfMake = vendors && vendors.pdfMake;
+  async function getPdfMake() {
+    let pdfMake = root.GptExporterVendors?.pdfMake;
+    if (!pdfMake || typeof pdfMake.createPdf !== 'function') {
+      await api.loadVendor?.('pdf');
+      pdfMake = root.GptExporterVendors?.pdfMake;
+    }
     if (!pdfMake || typeof pdfMake.createPdf !== 'function') throw new Error('本地 PDF 生成组件不可用，请重新加载扩展后重试。');
+    return pdfMake;
+  }
+
+  async function preparePdf() {
+    await ensureFont(await getPdfMake());
+  }
+
+  async function buildPdf(options) {
+    const pdfMake = await getPdfMake();
     const settings = Object.assign({ fontSize: 9, density: 'compact' }, options || {});
     const imageCache = new Map();
     if (settings.container && typeof settings.container.cloneNode === 'function') {
@@ -1196,5 +1213,6 @@
   }
 
   api.pdfDefinition = (options) => buildPdfDefinition(options);
+  api.preparePdf = preparePdf;
   api.buildPdf = buildPdf;
 })(globalThis);

@@ -309,10 +309,9 @@
     els['message-total'].textContent = `${messages.length} 条`;
   }
 
-  function renderPreview() {
+  function renderPreview(selected = selectedMessages()) {
     const renderSequence=++state.renderSequence;
     state.renderError=null;
-    const selected = selectedMessages();
     const empty = selected.length === 0;
     els['preview-empty'].hidden = !empty;
     els['preview-paper'].hidden = empty;
@@ -345,8 +344,9 @@
   function renderSelection() {
     const count = state.selected.size;
     els['selection-count'].textContent = `已选择 ${count} 条`;
-    state.selectedMedia = new Set(selectedAssets(selectedMessages()));
-    renderPreview();
+    const selected = selectedMessages();
+    state.selectedMedia = new Set(selectedAssets(selected));
+    renderPreview(selected);
     preloadSelectedImages();
   }
 
@@ -517,30 +517,57 @@
     preloadSelectedImages();
   }
 
-  function requestPdfPreview(delay = 0) {
+  function samePdfLayout(left, right) {
+    return left && right && left.fontSize === right.fontSize && left.density === right.density &&
+      left.pageSize === right.pageSize && left.orientation === right.orientation && left.includeDiagrams === right.includeDiagrams;
+  }
+
+  function schedulePdfPreview(job) {
+    const delay = job.readyAt - Date.now();
+    if (delay > 0) job.timer = root.setTimeout(() => { void buildPdfPreview(job); }, delay);
+    else void buildPdfPreview(job);
+  }
+
+  function requestPdfPreview(delay = 0, retry = false) {
     const job = activePdfPreview;
     if (!job || job.downloading) return;
+    const layout = pdfLayoutOptions();
+    if (!retry && samePdfLayout(layout, job.layout)) {
+      // The final change event can start a pending slider update immediately.
+      if (delay || !job.readyAt) return;
+      job.readyAt = 0;
+      root.clearTimeout(job.timer);
+      if (!job.running) schedulePdfPreview(job);
+      return;
+    }
     root.clearTimeout(job.timer);
-    job.layout = pdfLayoutOptions();
+    job.layout = layout;
+    job.readyAt = delay ? Date.now() + delay : 0;
     els['pdf-preview-download'].disabled = true;
     els['pdf-preview-open'].hidden = true;
     els['pdf-preview-retry'].hidden = true;
-    if (!job.running) {
-      if (delay) job.timer = root.setTimeout(() => { void buildPdfPreview(job); }, delay);
-      else void buildPdfPreview(job);
-    }
+    if (!job.running) schedulePdfPreview(job);
   }
 
   async function buildPdfPreview(job) {
+    if (activePdfPreview !== job) return;
     const { GptExporter: api } = root;
     job.running = true;
     try {
+      const preparation = api.preparePdf().then(() => null, error => error);
       if (!job.prepared) {
         showPdfStatus('正在读取所选图片与附件…');
         job.missing = await hydrateSelectedAssets();
         job.prepared = true;
       }
       while (activePdfPreview === job) {
+        const wait = job.readyAt - Date.now();
+        if (wait > 0) {
+          root.clearTimeout(job.timer);
+          job.timer = root.setTimeout(() => { void buildPdfPreview(job); }, wait);
+          return;
+        }
+        job.readyAt = 0;
         const includeDiagrams = job.layout.includeDiagrams;
         if (!job.snapshot || job.snapshotIncludesDiagrams !== includeDiagrams) {
           job.snapshot = null;
@@ -555,6 +582,10 @@
           job.snapshotIncludesDiagrams = includeDiagrams;
           if (job.layout.includeDiagrams !== includeDiagrams) continue;
         }
+        const preparationError = await preparation;
+        if (preparationError) throw preparationError;
+        if (activePdfPreview !== job) return;
+        if (job.layout.includeDiagrams !== includeDiagrams || job.readyAt > Date.now()) continue;
         const layout = job.layout;
         showPdfStatus('正在生成分页预览…');
         const content = await api.buildPdf({
@@ -562,7 +593,8 @@
           conversationOnly: true, includeMetadata: false
         });
         if (activePdfPreview !== job) return;
-        if (layout !== job.layout) continue;
+        if (!samePdfLayout(layout, job.layout)) continue;
+        job.readyAt = 0;
         job.blob = new Blob([content], {type: 'application/pdf'});
         const previousUrl = job.url;
         job.url = root.URL.createObjectURL(job.blob);
@@ -700,7 +732,7 @@
       state.query = els['message-search'].value;
       renderList();
     });
-    els['conversation-title'].addEventListener('input', renderPreview);
+    els['conversation-title'].addEventListener('input', () => renderPreview());
     els['include-metadata'].addEventListener('change', () => {
       state.preferences.includeMetadata = els['include-metadata'].checked;
       renderPreview();
@@ -719,7 +751,7 @@
     });
     els['pdf-preview-dialog'].addEventListener('close', releasePdfPreview);
     els['close-pdf-preview'].addEventListener('click', () => els['pdf-preview-dialog'].close());
-    els['pdf-preview-retry'].addEventListener('click', () => requestPdfPreview());
+    els['pdf-preview-retry'].addEventListener('click', () => requestPdfPreview(0, true));
     els['pdf-preview-download'].addEventListener('click', downloadPdfPreview);
     els['pdf-font-size'].addEventListener('input', () => {
       els['pdf-font-value'].textContent = `${els['pdf-font-size'].value} pt`;
@@ -763,8 +795,8 @@
   async function init() {
     cacheElements();
     bindEvents();
-    await loadPreferences();
-    state.exportSettings = await root.GptExporter.exportSettings.read();
+    const [, settings] = await Promise.all([loadPreferences(), root.GptExporter.exportSettings.read()]);
+    state.exportSettings = settings;
     if (root.chrome?.storage?.onChanged) root.chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== 'local' || !changes[root.GptExporter.exportSettings.KEY]) return;
       state.exportSettings = root.GptExporter.exportSettings.normalize(changes[root.GptExporter.exportSettings.KEY].newValue);

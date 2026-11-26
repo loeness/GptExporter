@@ -92,6 +92,7 @@
     let result;
 
     if (CONTENT_FORMATS.has(format)) {
+      const preparation = format === 'pdf' ? api.preparePdf().then(() => null, error => error) : null;
       const assets = matchingAssets(model);
       model.assets = assets;
       await reportPhase(context,'assets');
@@ -101,6 +102,9 @@
       assertCurrent(context);
       if (!snapshot || typeof snapshot.cloneNode !== 'function') throw new Error('富内容快照生成失败。');
       if (format === 'pdf') {
+        const preparationError = await preparation;
+        assertCurrent(context);
+        if (preparationError) throw preparationError;
         if (typeof api.buildPdf !== 'function') throw new Error('本地 PDF 生成组件不可用，请重新加载扩展后重试。');
         await reportPhase(context,'pdf');
         const bytes = await api.buildPdf({

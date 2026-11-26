@@ -188,9 +188,23 @@ async function run() {
     assert.equal(await preview.locator('tbody').locator(renderedMath).count(), 2);
     const readerPreviewMs = Math.round(performance.now() - readerStarted);
     await reader.evaluate(() => {
-      const render = GptExporterVendors.renderMathSvg;
       let calls = 0;
-      GptExporterVendors.renderMathSvg = (...args) => { calls++; return render(...args); };
+      let wrapped = false;
+      const countRenders = () => {
+        const render = GptExporterVendors.renderMathSvg;
+        if (wrapped || typeof render !== 'function') return;
+        GptExporterVendors.renderMathSvg = (...args) => { calls++; return render(...args); };
+        wrapped = true;
+      };
+      countRenders();
+      if (!wrapped) {
+        const loadVendor = GptExporter.loadVendor;
+        GptExporter.loadVendor = async (name) => {
+          const vendors = await loadVendor(name);
+          if (name === 'math') countRenders();
+          return vendors;
+        };
+      }
       window.mathVectorCalls = () => calls;
     });
 
@@ -198,7 +212,9 @@ async function run() {
     const pdfStarted = performance.now();
     await reader.locator('[data-format="pdf"]').click();
     await reader.locator('#pdf-preview-dialog').waitFor({ state: 'visible', timeout });
-    await reader.waitForFunction(() => document.querySelector('#pdf-preview-frame')?.src.startsWith('blob:'), null, { timeout });
+    await reader.waitForFunction(() => document.querySelector('#pdf-preview-frame')?.src.startsWith('blob:') &&
+      !document.getElementById('pdf-preview-download')?.disabled, null, { timeout });
+    const readerPdfReadyMs = Math.round(performance.now() - pdfStarted);
     const pendingDownload = reader.waitForEvent('download', { timeout });
     await reader.locator('#pdf-preview-download').click();
     await (await pendingDownload).saveAs(file);
@@ -211,7 +227,7 @@ async function run() {
       assert.ok(vectorCalls > 0 && vectorCalls <= fixture.formulas / 2,
         `Repeated equations should reuse raster snapshots. Rendered ${vectorCalls} of ${fixture.formulas} equations.`);
     }
-    const report = { extension, messages: fixture.messages, branches: 4, formulas: fixture.formulas, readerPreviewMs,
+    const report = { extension, messages: fixture.messages, branches: 4, formulas: fixture.formulas, readerPreviewMs, readerPdfReadyMs,
       readerPdfMs, vectorCalls, ...pdf, output };
     fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify(report, null, 2));
     console.log(JSON.stringify(report, null, 2));

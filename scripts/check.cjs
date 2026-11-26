@@ -2,6 +2,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const {execFileSync} = require('node:child_process');
+const {createHash} = require('node:crypto');
 const vm = require('node:vm');
 const root = path.resolve(__dirname, '..', 'extension');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json')));
@@ -13,6 +14,13 @@ function exists(relative) {
 const files = [manifest.background.service_worker, manifest.action.default_popup, 'direct-export.html',
   ...Object.values(manifest.icons), ...manifest.content_scripts.flatMap(item => item.js)];
 files.forEach(exists);
+const {bundlesSha256} = JSON.parse(fs.readFileSync(path.join(root, 'vendor/provenance.json')));
+for (const name of ['libraries.js', 'mermaid.js', 'pdf-engine.js', 'pdf-formulas.js']) {
+  const relative = 'vendor/' + name;
+  exists(relative);
+  const hash = createHash('sha256').update(fs.readFileSync(path.join(root, relative))).digest('hex');
+  if (bundlesSha256?.[name] !== hash) throw new Error('Vendor bundle checksum mismatch: ' + name);
+}
 function walk(directory) {
   return fs.readdirSync(directory, {withFileTypes: true}).flatMap(item => {
     const target = path.join(directory, item.name);
