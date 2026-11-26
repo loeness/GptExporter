@@ -41,6 +41,12 @@
       "version": "3.2.2",
       "license": "Apache-2.0",
       "source": "https://github.com/mathjax/Mathjax-src/"
+    },
+    {
+      "name": "acorn",
+      "version": "8.15.0",
+      "license": "MIT",
+      "source": "git+https://github.com/acornjs/acorn.git"
     }
   ],
   "bundledPackages": [
@@ -440,6 +446,7 @@
     }
   ],
   "bundleSha256": "0a85f89cd688b4372f58fafc8e4489c327f4d9b95702c9ab83c973faa660979c",
+  "acornSha256": "fdb08546776ec6228b03e8d02b40d4ab3255bae5f401adba7ff5dad927ac5c9c",
   "font": {
     "name": "NotoSansCJKsc-Regular.otf",
     "source": "https://github.com/notofonts/noto-cjk/blob/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf",

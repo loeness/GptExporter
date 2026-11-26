@@ -7,6 +7,7 @@
 ## 近期更新
 
 - **网页图表与逐步演示**。框选 SVG、Canvas、跨域嵌入页面或普通图片，逐张保存或按操作顺序记录稳定画面，随 PDF 和离线 HTML 导出。ChatGPT 画面归属采集时的分支，跳转到同一对话内的锚点后仍可使用。
+- **可切换的对比选项**。ChatGPT 对话或共享页提供受支持的分段选项数据时，预览和导出会按原顺序展开各选项的标题、内容和结果表。
 - **PDF 分页与排版**。下载前可调整字号、紧凑度、纸张和方向。标题与表格里的公式也能排版，同一条提问里相邻的上传图片尽量两张同页。
 - **长对话与多图**。并行读取所选媒体，本地优化大图，复用同次导出中的重复公式和 PDF 预览素材。浏览器预览缓存达到上限时，会提示清除已有预览数据或用快捷导出。
 - **平台适配**。八个平台均可使用 SELECT 和快捷 PDF。Kimi 支持 `www.kimi.ai/en` 等入口。预览会显示数据来源和读取范围。[平台入口与适配范围](docs/platforms.md)
@@ -66,6 +67,8 @@ PDF 按聊天布局区分角色，用户消息靠右，助手回答靠左，并�
 
 预览与 PDF 会在本机将受支持的交互演示转为静态图。可读取数据的折线图保留数值和图例。能核对完整增广路径和容量的 Ford–Fulkerson 演示保留初始网络及每轮状态。指数分布速率演示缺少原控件当前值时使用明确标注的示例值。
 
+带 2–6 个分段选项的结构化对比组件，可在 PDF 和离线 HTML 中展开成分别带标题的静态结果。可导出的内容包括文字、说明和表格。页面只提供当前画面，或组件依赖当前尚未支持的交互逻辑时，可用下面的画面采集。
+
 对于已经在网页上显示的图表和演示，包括 Canvas、SVG、嵌入页面及普通图片，可以直接采集画面。
 
 1. 在原对话页打开浏览器工具栏上的扩展图标，在 **导出设置** 中点击 **采集图表和演示**，然后拖动框选图形区域。
@@ -124,6 +127,7 @@ npm run test:advanced
 npm run test:large-export
 npm run test:math-export
 npm run test:flow-diagrams
+npm run test:comparison-views
 npm run test:visual-capture
 npm run test:selection
 npm run test:platforms
@@ -131,7 +135,7 @@ npm run test:platforms
 
 可以通过 `GPT_EXPORTER_TEST_PYTHON` 指定安装了测试依赖的 Python 绝对路径，也可通过 `PLAYWRIGHT_BROWSERS_PATH` 指定 Playwright 浏览器缓存。运行扩展本身无需这些开发工具。
 
-浏览器回归使用合成对话与模拟接口，覆盖 320 条消息与 24 张图片的大对话、公式密集的 PDF、跨域 Canvas 的 A → B → A 顺序、分支隔离、锚点跳转、离线 HTML 和八个平台的导出入口。截图、测试 PDF 和失败日志保存在忽略的 `test-results/`。GitHub Actions 执行源码检查和单元测试。
+浏览器回归使用合成对话与模拟接口，覆盖 320 条消息与 24 张图片的大对话、公式密集的 PDF、多个对比选项的标题与结果、跨域 Canvas 的 A → B → A 顺序、分支隔离、锚点跳转、离线 HTML 和八个平台的导出入口。截图、测试 PDF 和失败日志保存在忽略的 `test-results/`。GitHub Actions 执行源码检查和单元测试。
 
 修改渲染依赖后运行 `npm run build:vendor` 重建本地 bundle 与许可证清单；Noto 字体来源和 SHA-256 已记录，构建不会自动下载或替换字体。
 

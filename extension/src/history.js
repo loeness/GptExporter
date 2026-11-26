@@ -324,6 +324,8 @@
       messageIdsByNode.set(nodeId, id);
 
       const metadata = isRecord(message.metadata) ? message.metadata : {};
+      const role = normalizedRole(message.author && message.author.role);
+      const internal = isInternalMessage(message, role, metadata);
       const content = isRecord(message.content) ? message.content : {};
       const parts = Array.isArray(content.parts) ? content.parts.slice(0, 10000) : [];
       if (Array.isArray(content.parts) && content.parts.length > 10000) {
@@ -344,6 +346,11 @@
         const missingImageMarkers = partImageMarkers.filter((marker) => !fallback.includes(marker));
         if (missingImageMarkers.length) markdown += (markdown ? "\n\n" : "") + missingImageMarkers.join("\n");
       }
+      const originalMarkdown = markdown;
+      if (role === "assistant" && !internal && typeof api.renderDilComparisons === "function") {
+        markdown = api.renderDilComparisons(markdown, options.comparisonSources?.get(id) || metadata.model_dil_v2);
+      }
+      const expandedComparisons = markdown !== originalMarkdown;
 
       const attachmentCandidates = [];
       let attachmentCount = 0;
@@ -370,13 +377,13 @@
         if (!markdown.includes(marker)) markdown += (markdown ? "\n\n" : "") + marker;
       }
       const assetIds = [...new Set(partAssetIds.concat(localAssetIds))];
-      const text = textParts.map((part) => part.replace(/!\[([^\]]*)\]\(gpt-exporter-asset:[^)]+\)/g, "[Image: $1]")).join("\n") ||
+      const text = (expandedComparisons ? cleanString(markdown.replace(/!\[([^\]]*)\]\(gpt-exporter-asset:[^)]+\)/g, "[Image: $1]"), MAX_TEXT_CHARS) : "") ||
+        textParts.map((part) => part.replace(/!\[([^\]]*)\]\(gpt-exporter-asset:[^)]+\)/g, "[Image: $1]")).join("\n") ||
         cleanString(content.text, MAX_TEXT_CHARS) || cleanString(markdown, MAX_TEXT_CHARS);
-      const role = normalizedRole(message.author && message.author.role);
       const normalized = {
         id, role, markdown: cleanString(markdown, MAX_TEXT_CHARS), text: cleanString(text, MAX_TEXT_CHARS),
         html: text ? "<p>" + escapeHtml(text).replace(/\n/g, "<br>") + "</p>" : "",
-        ...(isInternalMessage(message, role, metadata) ? { visibility: "internal" } : {}),
+        ...(internal ? { visibility: "internal" } : {}),
         ...(message.create_time != null ? { createTime: safeTime(message.create_time) || cleanString(message.create_time, 100) } : {}),
         ...(assetIds.length ? { assetIds } : {})
       };
@@ -806,6 +813,9 @@
     const url = cleanString(options.url || (doc && doc.location && doc.location.href) || "", 4000);
     const route = pageKind(url);
     const page = supportedUrl(url);
+    const octaneRows = route && page && typeof api.readOctaneTranscript === "function"
+      ? api.readOctaneTranscript(doc, { shareId: route.kind === "shared" ? route.id : undefined }) : [];
+    const comparisonSources = new Map(octaneRows.filter(row => row.dil).map(row => [row.id, row.dil]));
     const fetchFn = typeof options.fetch === "function" ? options.fetch : (typeof root.fetch === "function" ? root.fetch.bind(root) : null);
     const acquisitionWarnings = [];
     let snapshot = null;
@@ -832,7 +842,7 @@
         if (!raw) raw = partialBridgeRaw;
         if (raw && findGraph(raw)) {
           const model = normalizeConversation(raw, {
-            url, kind: "api", complete: raw !== partialBridgeRaw, conversationId: route.id
+            url, kind: "api", complete: raw !== partialBridgeRaw, conversationId: route.id, comparisonSources
           });
           if (model.messages.length) return attachWarnings(model, acquisitionWarnings);
         }
@@ -848,7 +858,7 @@
         if (!raw) raw = partialBridgeRaw;
         if (raw && findGraph(raw)) {
           const model = normalizeConversation(raw, {
-            url, kind: "shared", complete: raw !== partialBridgeRaw, conversationId: route.id
+            url, kind: "shared", complete: raw !== partialBridgeRaw, conversationId: route.id, comparisonSources
           });
           if (model.messages.length) return attachWarnings(model, acquisitionWarnings);
         }
@@ -860,18 +870,28 @@
             raw = await fetchConversationData(fetchFn, page.origin, temporaryId, token);
           });
           if (raw && findGraph(raw)) {
-            const model = normalizeConversation(raw, { url, kind: "temporary", complete: true, conversationId: temporaryId });
+            const model = normalizeConversation(raw, { url, kind: "temporary", complete: true, conversationId: temporaryId, comparisonSources });
             if (model.messages.length) return attachWarnings(model, acquisitionWarnings);
           }
         }
         if (findGraph(partialData)) {
           const model = normalizeConversation(partialData, {
-            url, kind: "temporary", complete: false, conversationId: temporaryId || undefined
+            url, kind: "temporary", complete: false, conversationId: temporaryId || undefined, comparisonSources
           });
           if (model.messages.length) return attachWarnings(model, acquisitionWarnings);
         }
         if (snapshot && snapshot.truncated) addWarning(acquisitionWarnings, "页面桥接快照超过大小上限，已忽略不完整快照。");
         addWarning(acquisitionWarnings, "临时对话 API 快照不可用或未返回完整 mapping；使用已加载 DOM 回退。");
+      }
+      if (octaneRows.length) {
+        const messages = octaneRows.map(({id, role, markdown, dil}) => ({
+          id, role, markdown: dil && api.renderDilComparisons ? api.renderDilComparisons(markdown, dil) : markdown
+        }));
+        const kind = route.kind === "shared" ? "shared" : "dom";
+        const model = normalizeConversation({ title: pageTitle(doc), messages }, { url, kind, conversationId: route.id });
+        addWarning(model.warnings, "已读取页面提供的对话记录。历史分支与附件可用性取决于原对话。");
+        addDomAssets(doc, model);
+        return attachWarnings(model, acquisitionWarnings);
       }
       addWarning(acquisitionWarnings, route.kind === "shared"
         ? "共享对话结构化数据不可用；使用已加载 DOM 回退。"
